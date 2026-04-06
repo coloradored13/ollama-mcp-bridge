@@ -56,6 +56,7 @@ import math
 import re
 import time
 import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -74,12 +75,14 @@ from .errors import (
 from .mcp_client import MCPClientManager
 from .types import (
     ActionClass,
+    ApprovalMode,
     ApprovedTool,
     AuditEventType,
     ExecutionResult,
     GateDecision,
     OllamaToolCall,
     PendingToolApproval,
+    RegistryEntry,
     ResultSanitizationTier,
     SanitizationDecision,
     SanitizationResult,
@@ -672,7 +675,7 @@ class ResultSanitizer:
 
 
 class ToolApprovalRegistry:
-    """Persistent hash registry for rug-pull attack detection.
+    """Persistent structured registry for tool approval and rug-pull detection.
 
     WHAT IS A RUG PULL: An MCP server initially presents a safe tool definition
     to gain user approval, then silently changes the definition later. The tool
@@ -681,36 +684,61 @@ class ToolApprovalRegistry:
     was swapped post-approval to exfiltrate WhatsApp history.
 
     HOW WE DEFEND: When a tool is first approved, we store SHA-256(definition)
-    to disk. On every subsequent connection, we recompute the hash. If it doesn't
-    match, the tool is blocked and the user must explicitly re-approve it.
+    to disk as a structured RegistryEntry with timestamps, approval mode, and
+    optional deny tracking. On every subsequent connection, we recompute the hash.
+    If it doesn't match, the tool is blocked and the user must explicitly re-approve.
 
-    The hash covers name + description + input_schema (the full behavioral
-    definition). A legitimate tool update (new parameters, better description)
-    will trigger re-approval — this is by design, not a bug. The cost of a
-    false positive (re-approving a legitimate update) is far lower than the
-    cost of a false negative (missing a rug pull).
+    MIGRATION: Old flat-hash registries ({"server:tool": "hash"}) are auto-migrated
+    to structured entries with approval_mode=LEGACY on first load.
     """
 
     def __init__(self, registry_path: str = "~/.ollama-mcp-bridge/approved_tools.json"):
         self._path = Path(registry_path).expanduser()
-        self._hashes: dict[str, str] = {}  # "server:tool" → hash
+        self._entries: dict[str, RegistryEntry] = {}  # "server:tool" → structured entry
         self._load()
 
     def _load(self) -> None:
-        """Load approved hashes from disk."""
-        if self._path.exists():
-            try:
-                with open(self._path) as f:
-                    self._hashes = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                logger.warning("Could not load tool approval registry, starting fresh")
-                self._hashes = {}
+        """Load registry from disk, auto-migrating old flat-hash format."""
+        if not self._path.exists():
+            return
+        try:
+            with open(self._path) as f:
+                raw = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Could not load tool approval registry, starting fresh")
+            return
+
+        migrated = False
+        for key, value in raw.items():
+            if isinstance(value, str):
+                # Old format: {"server:tool": "hash"} — migrate to structured entry
+                parts = key.split(":", 1)
+                server = parts[0] if len(parts) == 2 else ""
+                tool_name = parts[1] if len(parts) == 2 else key
+                self._entries[key] = RegistryEntry(
+                    server=server,
+                    tool_name=tool_name,
+                    approved_hash=value,
+                    approved_at=None,
+                    approval_mode=ApprovalMode.LEGACY,
+                )
+                migrated = True
+            elif isinstance(value, dict):
+                # New structured format
+                self._entries[key] = RegistryEntry(**value)
+            else:
+                logger.warning("Skipping invalid registry entry for key '%s'", key)
+
+        if migrated:
+            logger.info("Migrated %d legacy registry entries to structured format", len(self._entries))
+            self._save()
 
     def _save(self) -> None:
-        """Save approved hashes to disk."""
+        """Persist registry to disk in structured format."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        data = {key: entry.model_dump(mode="json") for key, entry in self._entries.items()}
         with open(self._path, "w") as f:
-            json.dump(self._hashes, f, indent=2)
+            json.dump(data, f, indent=2)
 
     def _key(self, server: str, tool: str) -> str:
         return f"{server}:{tool}"
@@ -718,27 +746,106 @@ class ToolApprovalRegistry:
     def is_approved(self, tool: ToolSchema) -> bool:
         """Check if a tool's definition hash matches the approved hash."""
         key = self._key(tool.server, tool.name)
-        if key not in self._hashes:
+        entry = self._entries.get(key)
+        if entry is None:
             return False
-        return self._hashes[key] == tool.definition_hash
+        return entry.approved_hash == tool.definition_hash
 
     def is_known(self, server: str, tool: str) -> bool:
         """Check if a tool has ever been approved."""
-        return self._key(server, tool) in self._hashes
+        return self._key(server, tool) in self._entries
 
-    def approve(self, tool: ToolSchema) -> None:
-        """Register a tool's hash as approved."""
+    def approve(
+        self,
+        tool: ToolSchema,
+        mode: ApprovalMode = ApprovalMode.AUTO_APPROVED,
+    ) -> None:
+        """Register or update a tool's approval with structured metadata."""
         key = self._key(tool.server, tool.name)
-        self._hashes[key] = tool.definition_hash
+        now = datetime.now(timezone.utc)
+        existing = self._entries.get(key)
+
+        if existing is not None:
+            # Update existing entry — preserve denied_hashes, update hash and timestamps
+            self._entries[key] = RegistryEntry(
+                server=tool.server,
+                tool_name=tool.name,
+                approved_hash=tool.definition_hash,
+                approved_at=now,
+                approval_mode=mode,
+                classification=existing.classification,
+                notes=existing.notes,
+                last_seen_at=now,
+                denied_hashes=existing.denied_hashes,
+            )
+        else:
+            self._entries[key] = RegistryEntry(
+                server=tool.server,
+                tool_name=tool.name,
+                approved_hash=tool.definition_hash,
+                approved_at=now,
+                approval_mode=mode,
+                last_seen_at=now,
+            )
         self._save()
+
+    def deny(self, tool: ToolSchema) -> None:
+        """Record a denied tool definition hash.
+
+        If the tool has an existing entry (was previously approved), the denied
+        hash is appended to denied_hashes. If not, a new entry is created with
+        only denied_hashes populated and no approved_hash.
+        """
+        key = self._key(tool.server, tool.name)
+        existing = self._entries.get(key)
+
+        if existing is not None:
+            if tool.definition_hash not in existing.denied_hashes:
+                denied = list(existing.denied_hashes) + [tool.definition_hash]
+                self._entries[key] = existing.model_copy(update={"denied_hashes": denied})
+        else:
+            self._entries[key] = RegistryEntry(
+                server=tool.server,
+                tool_name=tool.name,
+                approved_hash="",
+                approval_mode=ApprovalMode.LEGACY,
+                denied_hashes=[tool.definition_hash],
+            )
+        self._save()
+
+    def was_denied(self, tool: ToolSchema) -> bool:
+        """Check if this exact tool definition was previously denied."""
+        key = self._key(tool.server, tool.name)
+        entry = self._entries.get(key)
+        if entry is None:
+            return False
+        return tool.definition_hash in entry.denied_hashes
+
+    def touch(self, tool: ToolSchema) -> None:
+        """Update last_seen_at for a known tool without changing approval state."""
+        key = self._key(tool.server, tool.name)
+        entry = self._entries.get(key)
+        if entry is not None:
+            self._entries[key] = entry.model_copy(
+                update={"last_seen_at": datetime.now(timezone.utc)},
+            )
+            self._save()
+
+    def get_entry(self, server: str, tool: str) -> RegistryEntry | None:
+        """Get the structured registry entry for a tool, or None."""
+        return self._entries.get(self._key(server, tool))
 
     def check_integrity(self, tool: ToolSchema) -> bool:
         """Check tool integrity. Returns True if OK, False if rug pull detected."""
         key = self._key(tool.server, tool.name)
-        if key not in self._hashes:
+        entry = self._entries.get(key)
+        if entry is None:
             # New tool — not a rug pull, just unapproved
             return True
-        return self._hashes[key] == tool.definition_hash
+        # Entry with empty approved_hash (deny-only record) is not a rug pull
+        if not entry.approved_hash:
+            return True
+        return entry.approved_hash == tool.definition_hash
 
 
 # --- Rate Limiter (SAD[8]) ---
@@ -1113,7 +1220,7 @@ class SecurityGateway:
                 if self._registry.is_known(server_name, tool.name):
                     # Known tool, hash matches (integrity check passed above)
                     self._tool_states[tool_key] = ToolState.APPROVED
-                    self._registry.approve(tool)  # re-persist (idempotent)
+                    self._registry.touch(tool)  # update last_seen_at (idempotent)
                     approved_tool = self._make_approved_tool(server_name, tool, san_result)
                     approved_for_server.append(approved_tool)
                     self._approved_tools[approved_tool.namespaced_name] = approved_tool
@@ -1121,7 +1228,7 @@ class SecurityGateway:
                 elif self._security.auto_approve_first_seen:
                     # Config: auto-approve first-seen (dev/test mode)
                     self._tool_states[tool_key] = ToolState.APPROVED
-                    self._registry.approve(tool)
+                    self._registry.approve(tool, mode=ApprovalMode.AUTO_APPROVED)
                     approved_tool = self._make_approved_tool(server_name, tool, san_result)
                     approved_for_server.append(approved_tool)
                     self._approved_tools[approved_tool.namespaced_name] = approved_tool
@@ -1133,7 +1240,7 @@ class SecurityGateway:
                 elif not self._security.require_first_run_approval:
                     # Config: legacy mode — first-seen tools auto-approved
                     self._tool_states[tool_key] = ToolState.APPROVED
-                    self._registry.approve(tool)
+                    self._registry.approve(tool, mode=ApprovalMode.AUTO_APPROVED)
                     approved_tool = self._make_approved_tool(server_name, tool, san_result)
                     approved_for_server.append(approved_tool)
                     self._approved_tools[approved_tool.namespaced_name] = approved_tool
@@ -1190,7 +1297,7 @@ class SecurityGateway:
                 # Approved by user
                 self._tool_states[tool_key] = ToolState.APPROVED
                 original_tool = self._pending_tool_schemas[tool_key]
-                self._registry.approve(original_tool)
+                self._registry.approve(original_tool, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
 
                 approved_tool = self._make_approved_tool(
                     pending.server,
@@ -1210,8 +1317,10 @@ class SecurityGateway:
                 )
                 logger.info("User approved first-seen tool '%s' on '%s'", pending.name, pending.server)
             else:
-                # Denied by user
+                # Denied by user — record hash so we remember this decision
                 self._tool_states[tool_key] = ToolState.DENIED_BY_USER
+                original_tool = self._pending_tool_schemas[tool_key]
+                self._registry.deny(original_tool)
                 scan_result.denied.append((pending.server, pending.name))
                 resolved.append(pending)
 

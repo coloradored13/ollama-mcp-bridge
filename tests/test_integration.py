@@ -34,6 +34,7 @@ from ollama_mcp_bridge.security import SecurityGateway, ToolApprovalRegistry
 from ollama_mcp_bridge.translator import ToolTranslator
 from ollama_mcp_bridge.types import (
     ActionClass,
+    ApprovalMode,
     ApprovedTool,
     AuditEventType,
     ExecutionResult,
@@ -615,6 +616,86 @@ class TestFirstRunApproval:
 
         assert scan.total_approved == 3
         assert not scan.has_pending
+
+
+# --- Registry Approval Mode Integration ---
+
+
+class TestRegistryApprovalModes:
+    """Verify that connect_and_scan() stores the correct ApprovalMode in the registry."""
+
+    @pytest.mark.asyncio
+    async def test_callback_approval_stores_first_run_explicit(self, tmp_path):
+        """User approving via callback → FIRST_RUN_EXPLICIT in registry."""
+        gateway, _ = _make_fresh_gateway(tmp_path)
+
+        async def approve_all(pending):
+            return {p.key: True for p in pending}
+
+        gateway.set_approval_callback(approve_all)
+        await gateway.connect_and_scan()
+
+        registry = gateway._registry
+        for name in ["echo", "add", "delete_file"]:
+            entry = registry.get_entry("test-server", name)
+            assert entry is not None, f"Missing registry entry for {name}"
+            assert entry.approval_mode == ApprovalMode.FIRST_RUN_EXPLICIT
+
+    @pytest.mark.asyncio
+    async def test_auto_approve_stores_auto_approved(self, tmp_path):
+        """auto_approve_first_seen=True → AUTO_APPROVED in registry."""
+        config = _make_config()
+        config.security.auto_approve_first_seen = True
+        gateway, _ = _make_fresh_gateway(tmp_path, config=config)
+        await gateway.connect_and_scan()
+
+        registry = gateway._registry
+        entry = registry.get_entry("test-server", "echo")
+        assert entry is not None
+        assert entry.approval_mode == ApprovalMode.AUTO_APPROVED
+
+    @pytest.mark.asyncio
+    async def test_legacy_mode_stores_auto_approved(self, tmp_path):
+        """require_first_run_approval=False → AUTO_APPROVED in registry."""
+        config = _make_config()
+        config.security.require_first_run_approval = False
+        gateway, _ = _make_fresh_gateway(tmp_path, config=config)
+        await gateway.connect_and_scan()
+
+        registry = gateway._registry
+        entry = registry.get_entry("test-server", "echo")
+        assert entry is not None
+        assert entry.approval_mode == ApprovalMode.AUTO_APPROVED
+
+    @pytest.mark.asyncio
+    async def test_known_tool_touch_preserves_mode(self, tmp_path):
+        """Returning user: known tool gets touch(), original mode preserved."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in ["echo", "add", "delete_file"]:
+            registry.approve(_make_tool_schema(name), mode=ApprovalMode.FIRST_RUN_EXPLICIT)
+
+        gateway, _ = _make_fresh_gateway(tmp_path, registry=registry)
+        await gateway.connect_and_scan()
+
+        entry = registry.get_entry("test-server", "echo")
+        assert entry.approval_mode == ApprovalMode.FIRST_RUN_EXPLICIT
+        assert entry.last_seen_at is not None
+
+    @pytest.mark.asyncio
+    async def test_callback_denial_records_denied_hash(self, tmp_path):
+        """User denying via callback → hash stored in denied_hashes."""
+        gateway, _ = _make_fresh_gateway(tmp_path)
+
+        async def deny_all(pending):
+            return {p.key: False for p in pending}
+
+        gateway.set_approval_callback(deny_all)
+        await gateway.connect_and_scan()
+
+        registry = gateway._registry
+        for name in ["echo", "add", "delete_file"]:
+            tool = _make_tool_schema(name)
+            assert registry.was_denied(tool), f"{name} should be recorded as denied"
 
 
 # --- DA GAP-2: AgentLoop multi-turn flow ---
