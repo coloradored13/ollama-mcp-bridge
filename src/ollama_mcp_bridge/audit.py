@@ -3,6 +3,10 @@
 Append-only JSON-L format. Every tool call is logged with:
 timestamp, session_id, event_type, server, tool, params_hash, result metrics,
 decision, duration. Async-buffered, thread-safe.
+
+SECURITY: Raw parameter values are NEVER written to the audit log. Parameters
+are hashed (SHA-256) and summarized structurally (field names, types, lengths).
+Secret-shaped keys are explicitly redacted from summaries.
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +22,41 @@ from typing import Any
 from .types import ActionClass, AuditEntry, AuditEventType
 
 logger = logging.getLogger(__name__)
+
+# Keys whose values should never appear in audit logs, even structurally.
+_SECRET_KEY_PATTERN = re.compile(
+    r"(password|passwd|secret|token|api[_-]?key|auth|credential|private[_-]?key)",
+    re.IGNORECASE,
+)
+
+
+def _summarize_params(params: dict[str, Any]) -> str:
+    """Build a structural summary of parameters without exposing raw values.
+
+    Shows field names, value types, and string lengths — enough for debugging
+    without leaking secrets. Secret-shaped keys get "[REDACTED]" as their summary.
+    """
+    parts: list[str] = []
+    for key, value in params.items():
+        if _SECRET_KEY_PATTERN.search(key):
+            parts.append(f"{key}:[REDACTED]")
+        elif isinstance(value, str):
+            parts.append(f"{key}:str({len(value)})")
+        elif isinstance(value, bool):
+            parts.append(f"{key}:bool")
+        elif isinstance(value, int):
+            parts.append(f"{key}:int")
+        elif isinstance(value, float):
+            parts.append(f"{key}:float")
+        elif isinstance(value, list):
+            parts.append(f"{key}:list({len(value)})")
+        elif isinstance(value, dict):
+            parts.append(f"{key}:dict({len(value)})")
+        elif value is None:
+            parts.append(f"{key}:null")
+        else:
+            parts.append(f"{key}:{type(value).__name__}")
+    return "{" + ", ".join(parts) + "}"
 
 
 class AuditLogger:
@@ -65,7 +105,7 @@ class AuditLogger:
         """Log a tool call event with computed hashes."""
         params_json = json.dumps(params, sort_keys=True, default=str)
         params_hash = hashlib.sha256(params_json.encode()).hexdigest()
-        params_summary = params_json[:200]
+        params_summary = _summarize_params(params)
 
         result_hash = ""
         result_size = 0
