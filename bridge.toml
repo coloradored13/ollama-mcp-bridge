@@ -27,6 +27,11 @@ enabled_detectors = [
 sanitization_block_threshold = 70.0
 sanitization_warn_threshold = 40.0
 
+# First-run approval: require explicit approval for first-seen tools (default: true)
+require_first_run_approval = true
+# Auto-approve all first-seen tools without prompting (dev/test convenience, default: false)
+# auto_approve_first_seen = false
+
 # --- MCP Servers ---
 # Configure each server you want the bridge to connect to.
 # allowed_tools: explicitly list tools the model can use (empty = none, fail-closed)

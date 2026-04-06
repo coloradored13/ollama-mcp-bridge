@@ -89,6 +89,25 @@ class ActionClass(str, Enum):
     DESTRUCTIVE = "DESTRUCTIVE"
 
 
+class ToolState(str, Enum):
+    """State of a tool in the first-run approval pipeline.
+
+    Lifecycle:
+      DISCOVERED → ALLOWLISTED → [sanitize] → PENDING_FIRST_APPROVAL → APPROVED / DENIED_BY_USER
+      DISCOVERED → ALLOWLISTED → [sanitize] → BLOCKED_SANITIZATION  (terminal)
+      DISCOVERED → ALLOWLISTED → [integrity] → BLOCKED_INTEGRITY    (terminal)
+      DISCOVERED → ALLOWLISTED → [hash match] → APPROVED            (auto, skip pending)
+    """
+
+    DISCOVERED = "DISCOVERED"
+    ALLOWLISTED = "ALLOWLISTED"
+    PENDING_FIRST_APPROVAL = "PENDING_FIRST_APPROVAL"
+    APPROVED = "APPROVED"
+    BLOCKED_SANITIZATION = "BLOCKED_SANITIZATION"
+    BLOCKED_INTEGRITY = "BLOCKED_INTEGRITY"
+    DENIED_BY_USER = "DENIED_BY_USER"
+
+
 class ApprovedTool(BaseModel):
     """Tool that has passed the full security ingestion pipeline.
 
@@ -243,6 +262,50 @@ class ExecutionResult(BaseModel):
     duration_ms: float = 0.0
 
 
+class PendingToolApproval(BaseModel):
+    """A tool awaiting first-run human approval.
+
+    Presented to the approval callback with enough context for a human
+    to make an informed approve/deny decision.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    server: str
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    definition_hash: str
+    sanitization_result: SanitizationResult
+
+    @property
+    def key(self) -> str:
+        """Unique key for this tool in callback response dict."""
+        return f"{self.server}:{self.name}"
+
+
+class ScanResult(BaseModel):
+    """Structured result of SecurityGateway.connect_and_scan().
+
+    Gives the caller a complete picture of what happened during scan:
+    which tools were approved, which are pending, which were blocked.
+    """
+
+    approved: dict[str, list[ApprovedTool]] = Field(default_factory=dict)
+    pending: list[PendingToolApproval] = Field(default_factory=list)
+    blocked_sanitization: list[tuple[str, str]] = Field(default_factory=list)
+    blocked_integrity: list[tuple[str, str]] = Field(default_factory=list)
+    denied: list[tuple[str, str]] = Field(default_factory=list)
+
+    @property
+    def total_approved(self) -> int:
+        return sum(len(t) for t in self.approved.values())
+
+    @property
+    def has_pending(self) -> bool:
+        return len(self.pending) > 0
+
+
 # --- Audit types ---
 
 
@@ -259,6 +322,9 @@ class AuditEventType(str, Enum):
     SANITIZATION_WARN = "sanitization_warn"
     SANITIZATION_BLOCK = "sanitization_block"
     RESULT_QUARANTINED = "result_quarantined"
+    TOOL_PENDING_APPROVAL = "tool_pending_approval"
+    TOOL_FIRST_APPROVED = "tool_first_approved"
+    TOOL_FIRST_DENIED = "tool_first_denied"
     SESSION_START = "session_start"
     SESSION_END = "session_end"
 

@@ -39,11 +39,11 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from .audit import AuditLogger
 from .config import BridgeConfig, load_config
-from .errors import BridgeError, ConfigError
+from .errors import BridgeError, ConfigError, NoApprovedToolsError
 from .loop import AgentLoop
 from .mcp_client import MCPClientManager
 from .ollama_client import OllamaClient
-from .security import ConfirmationCallback, SecurityGateway
+from .security import ApprovalCallback, ConfirmationCallback, SecurityGateway
 from .translator import ToolTranslator
 from .types import (
     AuditEntry,
@@ -133,6 +133,15 @@ class Bridge:
         """
         self._security.set_confirmation_callback(callback)
 
+    def set_approval_callback(self, callback: ApprovalCallback) -> None:
+        """Set callback for first-run tool approval.
+
+        Callback receives all pending tools at once (batch-capable).
+        Signature: async (list[PendingToolApproval]) -> dict[str, bool]
+        where keys are "server:tool_name" and values are approve/deny.
+        """
+        self._security.set_approval_callback(callback)
+
     async def __aenter__(self) -> "Bridge":
         """Connect to all configured MCP servers."""
         await self._connect()
@@ -161,11 +170,21 @@ class Bridge:
         self._connected = True
 
         approved = self._security.get_approved_tools()
+        pending = self._security.get_pending_tools()
         logger.info(
-            "Bridge connected: %d approved tools across %d servers",
+            "Bridge connected: %d approved tools, %d pending approval, across %d servers",
             len(approved),
+            len(pending),
             len(self._config.servers),
         )
+
+        if pending:
+            logger.warning(
+                "%d tool(s) require first-run approval before they can be used. "
+                "Set an approval callback via bridge.set_approval_callback() "
+                "before connecting, or configure auto_approve_first_seen=true.",
+                len(pending),
+            )
 
     async def _disconnect(self) -> None:
         """Disconnect and clean up."""
@@ -202,6 +221,18 @@ class Bridge:
         """
         if not self._connected:
             await self._connect()
+
+        # Check for pending-but-no-approved condition
+        approved = self._security.get_approved_tools()
+        pending = self._security.get_pending_tools()
+        if not approved and pending:
+            raise NoApprovedToolsError(
+                f"No approved tools available. {len(pending)} tool(s) are pending "
+                "first-run approval. Set an approval callback via "
+                "bridge.set_approval_callback() before connecting, or "
+                "configure auto_approve_first_seen=true in [security].",
+                pending_count=len(pending),
+            )
 
         # Override max_turns if specified
         if max_turns is not None:

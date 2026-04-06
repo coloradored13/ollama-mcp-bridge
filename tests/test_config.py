@@ -66,6 +66,21 @@ class TestSecurityConfig:
         )
         assert len(cfg.enabled_detectors) == 2
 
+    def test_default_require_first_run_approval(self):
+        cfg = SecurityConfig()
+        assert cfg.require_first_run_approval is True
+
+    def test_default_auto_approve_first_seen(self):
+        cfg = SecurityConfig()
+        assert cfg.auto_approve_first_seen is False
+
+    def test_auto_approve_warns_when_require_also_true(self, caplog):
+        """auto_approve_first_seen=True with require_first_run_approval=True logs warning."""
+        import logging
+        with caplog.at_level(logging.WARNING):
+            SecurityConfig(auto_approve_first_seen=True, require_first_run_approval=True)
+        assert "auto_approve_first_seen=True overrides" in caplog.text
+
 
 class TestBridgeConfig:
     def test_valid_server_names(self):

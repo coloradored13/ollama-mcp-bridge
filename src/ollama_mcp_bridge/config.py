@@ -91,6 +91,8 @@ class SecurityConfig(BaseModel):
     )
     sanitization_block_threshold: float = 70.0
     sanitization_warn_threshold: float = 40.0
+    require_first_run_approval: bool = True
+    auto_approve_first_seen: bool = False
 
     @model_validator(mode="after")
     def max_turns_within_hard_cap(self) -> "SecurityConfig":
@@ -98,6 +100,15 @@ class SecurityConfig(BaseModel):
             raise ValueError(
                 f"max_turns ({self.max_turns}) cannot exceed "
                 f"max_turns_hard_cap ({self.max_turns_hard_cap})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def warn_auto_approve_overrides(self) -> "SecurityConfig":
+        if self.auto_approve_first_seen and self.require_first_run_approval:
+            logger.warning(
+                "auto_approve_first_seen=True overrides require_first_run_approval — "
+                "all first-seen tools will be auto-approved."
             )
         return self
 

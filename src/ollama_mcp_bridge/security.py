@@ -79,10 +79,13 @@ from .types import (
     ExecutionResult,
     GateDecision,
     OllamaToolCall,
+    PendingToolApproval,
     ResultSanitizationTier,
     SanitizationDecision,
     SanitizationResult,
+    ScanResult,
     ToolSchema,
+    ToolState,
     ValidationResult,
 )
 
@@ -830,6 +833,12 @@ class RateLimiter:
 # Type for confirmation callback: receives tool info, returns True to approve
 ConfirmationCallback = Callable[[str, str, str, dict[str, Any]], Awaitable[bool]]
 
+# Type for first-run approval callback: receives pending tools, returns approve/deny dict
+ApprovalCallback = Callable[
+    [list["PendingToolApproval"]],
+    Awaitable[dict[str, bool]],
+]
+
 
 class ActionGate:
     """Human-in-the-loop gate for destructive tool actions.
@@ -951,6 +960,7 @@ class SecurityGateway:
         mcp: MCPClientManager,
         config: BridgeConfig,
         audit: AuditLogger,
+        registry: ToolApprovalRegistry | None = None,
     ):
         self._mcp = mcp
         self._config = config
@@ -960,7 +970,7 @@ class SecurityGateway:
         self._sanitizer = ToolSanitizer(config.security)
         self._validator = ParameterValidator()
         self._result_sanitizer = ResultSanitizer(config.security.max_result_bytes)
-        self._registry = ToolApprovalRegistry()
+        self._registry = registry or ToolApprovalRegistry()
         self._rate_limiter = RateLimiter(config.security)
         self._gate = ActionGate(
             require_confirmation=config.security.require_confirmation_for_destructive,
@@ -970,30 +980,68 @@ class SecurityGateway:
         self._approved_tools: dict[str, ApprovedTool] = {}  # namespaced_name → tool
         self._tools_by_server: dict[str, list[ApprovedTool]] = {}
         self._discovered_tools: dict[str, list[ToolSchema]] = {}  # server → all discovered tools
+        self._tool_states: dict[str, ToolState] = {}  # "server:tool" → state
+        self._pending_tools: list[PendingToolApproval] = []
+        self._pending_tool_schemas: dict[str, ToolSchema] = {}  # originals for registry.approve()
+        self._approval_callback: ApprovalCallback | None = None
 
     def set_confirmation_callback(self, callback: ConfirmationCallback) -> None:
         """Set callback for destructive action confirmation."""
         self._gate.set_confirmation_callback(callback)
 
-    async def connect_and_scan(self) -> dict[str, list[ApprovedTool]]:
+    def set_approval_callback(self, callback: ApprovalCallback) -> None:
+        """Set callback for first-run tool approval.
+
+        Callback receives all pending tools at once (batch-capable).
+        Returns dict mapping "server:tool_name" keys to bool (True=approve, False=deny).
+        """
+        self._approval_callback = callback
+
+    def get_pending_tools(self) -> list[PendingToolApproval]:
+        """Get tools awaiting first-run approval."""
+        return list(self._pending_tools)
+
+    def get_tool_states(self) -> dict[str, ToolState]:
+        """Get current state of all discovered tools."""
+        return dict(self._tool_states)
+
+    def _make_approved_tool(
+        self, server_name: str, tool: ToolSchema, san_result: SanitizationResult,
+    ) -> ApprovedTool:
+        """Create an ApprovedTool from a ToolSchema that passed all checks."""
+        classification = self._config.get_tool_classification(server_name, tool.name)
+        return ApprovedTool(
+            server=server_name,
+            name=tool.name,
+            description=san_result.sanitized_description,
+            input_schema=tool.input_schema,
+            classification=classification,
+            definition_hash=tool.definition_hash,
+        )
+
+    async def connect_and_scan(self) -> ScanResult:
         """Connect to all configured servers and scan tools for security.
 
-        Returns dict of server → approved tools.
+        Returns ScanResult with approved, pending, blocked, and denied tools.
 
-        ALLOWLIST BEHAVIOR: Only tools explicitly listed in a server's
-        allowed_tools are candidates for approval. An empty allowed_tools
-        means no tools from that server are available (fail-closed).
-
-        FIRST-RUN BEHAVIOR: Allowlisted tools that pass sanitization are
-        auto-approved and added to the hash registry on first encounter.
-        Subsequent connects detect rug pulls (definition changes) via hash
-        comparison.
+        State machine flow for each tool:
+          1. DISCOVERED — tool found on server
+          2. Allowlist check → stays DISCOVERED if not in allowlist
+          3. Sanitization → BLOCKED_SANITIZATION (terminal) or continue
+          4. Integrity check → BLOCKED_INTEGRITY (terminal) or continue
+          5. First-seen check:
+             a. Known + hash match → APPROVED (auto)
+             b. First-seen + auto_approve → APPROVED
+             c. First-seen + !require_approval → APPROVED (legacy)
+             d. First-seen + require_approval → PENDING_FIRST_APPROVAL
+          6. Approval callback (if set) → APPROVED or DENIED_BY_USER
         """
         all_tools = await self._mcp.list_all_tools()
+        scan_result = ScanResult()
 
         for server_name, tools in all_tools.items():
             self._discovered_tools[server_name] = tools
-            approved = []
+            approved_for_server = []
 
             if tools and not any(self._config.is_tool_allowed(server_name, t.name) for t in tools):
                 logger.warning(
@@ -1003,15 +1051,21 @@ class SecurityGateway:
                 )
 
             for tool in tools:
+                tool_key = f"{server_name}:{tool.name}"
+                self._tool_states[tool_key] = ToolState.DISCOVERED
+
                 # Check allowlist (SR-4)
                 if not self._config.is_tool_allowed(server_name, tool.name):
                     logger.info("Tool '%s' on '%s' not in allowlist — skipped", tool.name, server_name)
                     continue
 
+                self._tool_states[tool_key] = ToolState.ALLOWLISTED
+
                 # Sanitize tool definition (SR-1)
                 san_result = self._sanitizer.sanitize(tool)
 
                 if san_result.decision == SanitizationDecision.BLOCK:
+                    self._tool_states[tool_key] = ToolState.BLOCKED_SANITIZATION
                     self._audit.log_event(
                         AuditEventType.SANITIZATION_BLOCK,
                         server=server_name,
@@ -1023,6 +1077,7 @@ class SecurityGateway:
                         "BLOCKED tool '%s' on '%s': score=%.0f rules=%s",
                         tool.name, server_name, san_result.score, san_result.triggered_rules,
                     )
+                    scan_result.blocked_sanitization.append((server_name, tool.name))
                     continue
 
                 if san_result.decision == SanitizationDecision.WARN:
@@ -1040,6 +1095,7 @@ class SecurityGateway:
 
                 # Check rug pull (SR-2)
                 if not self._registry.check_integrity(tool):
+                    self._tool_states[tool_key] = ToolState.BLOCKED_INTEGRITY
                     self._audit.log_event(
                         AuditEventType.RUG_PULL_DETECTED,
                         server=server_name,
@@ -1050,27 +1106,127 @@ class SecurityGateway:
                         "RUG PULL detected: tool '%s' on '%s' definition changed!",
                         tool.name, server_name,
                     )
-                    # Skip this tool — requires re-approval
+                    scan_result.blocked_integrity.append((server_name, tool.name))
                     continue
 
-                # Approve tool
-                self._registry.approve(tool)
+                # First-seen vs known-hash-match decision
+                if self._registry.is_known(server_name, tool.name):
+                    # Known tool, hash matches (integrity check passed above)
+                    self._tool_states[tool_key] = ToolState.APPROVED
+                    self._registry.approve(tool)  # re-persist (idempotent)
+                    approved_tool = self._make_approved_tool(server_name, tool, san_result)
+                    approved_for_server.append(approved_tool)
+                    self._approved_tools[approved_tool.namespaced_name] = approved_tool
 
-                classification = self._config.get_tool_classification(server_name, tool.name)
-                approved_tool = ApprovedTool(
-                    server=server_name,
-                    name=tool.name,
-                    description=san_result.sanitized_description,
-                    input_schema=tool.input_schema,
-                    classification=classification,
-                    definition_hash=tool.definition_hash,
+                elif self._security.auto_approve_first_seen:
+                    # Config: auto-approve first-seen (dev/test mode)
+                    self._tool_states[tool_key] = ToolState.APPROVED
+                    self._registry.approve(tool)
+                    approved_tool = self._make_approved_tool(server_name, tool, san_result)
+                    approved_for_server.append(approved_tool)
+                    self._approved_tools[approved_tool.namespaced_name] = approved_tool
+                    logger.info(
+                        "Auto-approved first-seen tool '%s' on '%s' (auto_approve_first_seen=True)",
+                        tool.name, server_name,
+                    )
+
+                elif not self._security.require_first_run_approval:
+                    # Config: legacy mode — first-seen tools auto-approved
+                    self._tool_states[tool_key] = ToolState.APPROVED
+                    self._registry.approve(tool)
+                    approved_tool = self._make_approved_tool(server_name, tool, san_result)
+                    approved_for_server.append(approved_tool)
+                    self._approved_tools[approved_tool.namespaced_name] = approved_tool
+
+                else:
+                    # First-seen + require_first_run_approval → PENDING
+                    self._tool_states[tool_key] = ToolState.PENDING_FIRST_APPROVAL
+                    pending = PendingToolApproval(
+                        server=server_name,
+                        name=tool.name,
+                        description=san_result.sanitized_description,
+                        input_schema=tool.input_schema,
+                        definition_hash=tool.definition_hash,
+                        sanitization_result=san_result,
+                    )
+                    self._pending_tools.append(pending)
+                    self._pending_tool_schemas[tool_key] = tool
+                    scan_result.pending.append(pending)
+                    self._audit.log_event(
+                        AuditEventType.TOOL_PENDING_APPROVAL,
+                        server=server_name,
+                        tool=tool.name,
+                        reason="First-seen tool requires approval",
+                    )
+                    logger.info(
+                        "Tool '%s' on '%s' pending first-run approval",
+                        tool.name, server_name,
+                    )
+
+            self._tools_by_server[server_name] = approved_for_server
+            scan_result.approved[server_name] = list(approved_for_server)
+
+        # Resolve pending tools via callback (if set)
+        if self._pending_tools and self._approval_callback:
+            await self._resolve_pending_approvals(scan_result)
+
+        return scan_result
+
+    async def _resolve_pending_approvals(self, scan_result: ScanResult) -> None:
+        """Invoke the approval callback and resolve pending tools."""
+        assert self._approval_callback is not None
+
+        decisions = await self._approval_callback(list(self._pending_tools))
+
+        resolved = []
+        for pending in self._pending_tools:
+            decision = decisions.get(pending.key)
+            if decision is None:
+                continue
+
+            tool_key = pending.key
+
+            if decision:
+                # Approved by user
+                self._tool_states[tool_key] = ToolState.APPROVED
+                original_tool = self._pending_tool_schemas[tool_key]
+                self._registry.approve(original_tool)
+
+                approved_tool = self._make_approved_tool(
+                    pending.server,
+                    original_tool,
+                    pending.sanitization_result,
                 )
-                approved.append(approved_tool)
                 self._approved_tools[approved_tool.namespaced_name] = approved_tool
+                self._tools_by_server.setdefault(pending.server, []).append(approved_tool)
+                scan_result.approved.setdefault(pending.server, []).append(approved_tool)
+                resolved.append(pending)
 
-            self._tools_by_server[server_name] = approved
+                self._audit.log_event(
+                    AuditEventType.TOOL_FIRST_APPROVED,
+                    server=pending.server,
+                    tool=pending.name,
+                    reason="User approved first-seen tool",
+                )
+                logger.info("User approved first-seen tool '%s' on '%s'", pending.name, pending.server)
+            else:
+                # Denied by user
+                self._tool_states[tool_key] = ToolState.DENIED_BY_USER
+                scan_result.denied.append((pending.server, pending.name))
+                resolved.append(pending)
 
-        return self._tools_by_server
+                self._audit.log_event(
+                    AuditEventType.TOOL_FIRST_DENIED,
+                    server=pending.server,
+                    tool=pending.name,
+                    reason="User denied first-seen tool",
+                )
+                logger.info("User denied first-seen tool '%s' on '%s'", pending.name, pending.server)
+
+        # Remove resolved tools from pending list
+        resolved_keys = {p.key for p in resolved}
+        self._pending_tools = [p for p in self._pending_tools if p.key not in resolved_keys]
+        scan_result.pending = [p for p in scan_result.pending if p.key not in resolved_keys]
 
     def get_approved_tools(self) -> list[ApprovedTool]:
         """Get all approved tools across all servers."""

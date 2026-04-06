@@ -123,6 +123,14 @@ class ToolIntegrityError(SecurityError):
         self.server = server
 
 
+class NoApprovedToolsError(SecurityError):
+    """No tools available — pending tools require approval before use."""
+
+    def __init__(self, message: str, pending_count: int = 0):
+        super().__init__(message)
+        self.pending_count = pending_count
+
+
 # --- Loop ---
 
 

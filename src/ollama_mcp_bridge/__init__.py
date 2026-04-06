@@ -23,6 +23,7 @@ from .errors import (
     MCPError,
     MCPTimeoutError,
     MCPToolError,
+    NoApprovedToolsError,
     OllamaConnectionError,
     OllamaError,
     OllamaModelError,
@@ -38,10 +39,13 @@ from .types import (
     ActionClass,
     AuditEntry,
     BridgeResult,
+    PendingToolApproval,
+    ScanResult,
     ServerHealth,
     StreamEvent,
     StreamEventType,
     ToolCallRecord,
+    ToolState,
 )
 
 __version__ = "0.1.0"
@@ -56,6 +60,9 @@ __all__ = [
     "load_config",
     # Results
     "BridgeResult",
+    "ScanResult",
+    "PendingToolApproval",
+    "ToolState",
     "StreamEvent",
     "StreamEventType",
     "ToolCallRecord",
@@ -79,6 +86,7 @@ __all__ = [
     "RateLimitError",
     "ConfirmationDeniedError",
     "ToolIntegrityError",
+    "NoApprovedToolsError",
     "LoopError",
     "MaxTurnsError",
     "StuckModelError",
