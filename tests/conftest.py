@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
 import pytest
 
 from ollama_mcp_bridge.config import BridgeConfig, SecurityConfig, ServerConfig
@@ -11,6 +15,60 @@ from ollama_mcp_bridge.types import (
     OllamaToolCall,
     ToolSchema,
 )
+
+
+# --- Ollama availability detection ---
+
+def _ollama_available() -> bool:
+    """Check if Ollama is running and has at least one model."""
+    try:
+        import urllib.request
+        import json
+        resp = urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3)
+        data = json.loads(resp.read())
+        return len(data.get("models", [])) > 0
+    except Exception:
+        return False
+
+
+def _pick_model() -> str:
+    """Pick the smallest available Ollama model for fast tests."""
+    try:
+        import urllib.request
+        import json
+        resp = urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3)
+        data = json.loads(resp.read())
+        models = data.get("models", [])
+        if not models:
+            return ""
+        # Prefer smallest model for speed
+        models.sort(key=lambda m: m.get("size", float("inf")))
+        return models[0]["name"]
+    except Exception:
+        return ""
+
+
+# Path to the test MCP server
+TEST_MCP_SERVER = str(Path(__file__).parent / "fixtures" / "test_mcp_server.py")
+
+# Python interpreter in the project venv
+TEST_PYTHON = sys.executable
+
+
+ollama_is_available = _ollama_available()
+requires_ollama = pytest.mark.skipif(
+    not ollama_is_available,
+    reason="Ollama not running or no models available",
+)
+
+
+@pytest.fixture
+def ollama_model() -> str:
+    """Return the smallest available Ollama model name."""
+    model = _pick_model()
+    if not model:
+        pytest.skip("No Ollama models available")
+    return model
 
 
 @pytest.fixture
