@@ -48,9 +48,11 @@ THREAT MODEL (what we defend against):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -517,7 +519,6 @@ class ParameterValidator:
 
         elif param_type == "number" or param_type == "integer":
             if isinstance(value, float):
-                import math
                 if math.isnan(value) or math.isinf(value):
                     errors.append(f"Parameter '{name}': NaN/Infinity not allowed")
 
@@ -598,11 +599,14 @@ class ParameterValidator:
 class ResultSanitizer:
     """Sanitize tool results before returning to model context.
 
-    3-tier response per CQ-4 resolution:
-    - CLEAN: no issues
-    - ANNOTATED: suspicious content, warning appended
-    - REDACTED: suspicious content stripped
-    - QUARANTINED: full result blocked
+    Tiers produced by this implementation:
+    - CLEAN: no issues (provenance tag prepended)
+    - REDACTED: suspicious role/instruction patterns stripped
+    - QUARANTINED: heavy injection attempt — full result blocked
+
+    Note: ANNOTATED tier is defined in the enum but not currently produced.
+    It is reserved for future use (e.g., low-confidence suspicious content
+    where annotation is preferable to redaction).
     """
 
     # Role-prefix patterns to strip from results
@@ -855,6 +859,34 @@ class ActionGate:
         """Set the callback for requesting human confirmation."""
         self._confirmation_callback = callback
 
+    def has_callback(self) -> bool:
+        """Check if a confirmation callback is registered."""
+        return self._confirmation_callback is not None
+
+    async def request_confirmation(
+        self,
+        server: str,
+        tool_name: str,
+        action_class: str,
+        arguments: dict[str, Any],
+    ) -> bool:
+        """Request human confirmation for a destructive action.
+
+        Returns True if confirmed, False if denied or timed out.
+        Raises ConfirmationDeniedError if no callback is set.
+        """
+        if not self._confirmation_callback:
+            raise ConfirmationDeniedError(
+                f"No confirmation callback set for destructive tool: {tool_name}"
+            )
+        try:
+            return await asyncio.wait_for(
+                self._confirmation_callback(server, tool_name, action_class, arguments),
+                timeout=self._timeout,
+            )
+        except asyncio.TimeoutError:
+            return False
+
     def classify(self, tool: ApprovedTool) -> GateDecision:
         """Determine gate decision for a tool call."""
         if tool.classification == ActionClass.READ:
@@ -946,6 +978,14 @@ class SecurityGateway:
         """Connect to all configured servers and scan tools for security.
 
         Returns dict of server → approved tools.
+
+        FIRST-RUN BEHAVIOR: Tools that pass sanitization and are in the
+        allowlist are auto-approved and added to the hash registry on first
+        encounter. Subsequent connects detect rug pulls (definition changes)
+        via hash comparison. This means the first connection to a new server
+        trusts the tool definitions if they pass sanitization — there is no
+        interactive first-run approval step. The allowlist in config is the
+        user's explicit trust signal.
         """
         all_tools = await self._mcp.list_all_tools()
 
@@ -1085,42 +1125,29 @@ class SecurityGateway:
         # 3. Action gate (SR-7)
         gate_decision = self._gate.classify(approved)
         if gate_decision == GateDecision.NEEDS_CONFIRMATION:
-            if self._gate._confirmation_callback:
-                import asyncio
-                try:
-                    confirmed = await asyncio.wait_for(
-                        self._gate._confirmation_callback(
-                            approved.server,
-                            approved.name,
-                            str(approved.classification.value),
-                            tool_call.arguments,
-                        ),
-                        timeout=self._gate._timeout,
-                    )
-                except asyncio.TimeoutError:
-                    confirmed = False
+            confirmed = await self._gate.request_confirmation(
+                server=approved.server,
+                tool_name=approved.name,
+                action_class=str(approved.classification.value),
+                arguments=tool_call.arguments,
+            )
 
-                if not confirmed:
-                    self._audit.log_event(
-                        AuditEventType.TOOL_DENIED,
-                        server=approved.server,
-                        tool=approved.name,
-                        reason="User denied confirmation",
-                    )
-                    raise ConfirmationDeniedError(
-                        f"User denied destructive action: {approved.name}"
-                    )
-
+            if not confirmed:
                 self._audit.log_event(
-                    AuditEventType.TOOL_CONFIRMED,
+                    AuditEventType.TOOL_DENIED,
                     server=approved.server,
                     tool=approved.name,
+                    reason="User denied confirmation",
                 )
-            else:
-                # No callback set — deny by default for destructive
                 raise ConfirmationDeniedError(
-                    f"No confirmation callback set for destructive tool: {approved.name}"
+                    f"User denied destructive action: {approved.name}"
                 )
+
+            self._audit.log_event(
+                AuditEventType.TOOL_CONFIRMED,
+                server=approved.server,
+                tool=approved.name,
+            )
         elif gate_decision == GateDecision.DENIED:
             raise ToolBlockedError(
                 f"Tool '{approved.name}' denied by gate",

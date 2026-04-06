@@ -6,7 +6,6 @@ build-backend = "hatchling.backends"
 name = "ollama-mcp-bridge"
 version = "0.1.0"
 description = "Security-first bridge connecting Ollama models to MCP tool servers"
-readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
