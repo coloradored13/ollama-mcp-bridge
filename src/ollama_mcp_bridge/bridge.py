@@ -49,8 +49,10 @@ from .types import (
     AuditEntry,
     AuditEventType,
     BridgeResult,
+    PendingToolApproval,
     ServerHealth,
     StreamEvent,
+    ToolSchema,
 )
 
 logger = logging.getLogger(__name__)
@@ -305,6 +307,51 @@ class Bridge:
         for server, tools in self._security.get_approved_tools_by_server().items():
             result[server] = [t.name for t in tools]
         return result
+
+    async def list_discovered_tools(self) -> dict[str, list[ToolSchema]]:
+        """List all discovered tools by server, including unapproved.
+
+        Returns the raw ToolSchema for each tool discovered during connect_and_scan(),
+        regardless of approval state. Useful for displaying what's available and
+        letting the user decide what to approve.
+        """
+        if not self._connected:
+            await self._connect()
+        return self._security.get_discovered_tools_by_server()
+
+    async def list_pending_tool_approvals(self) -> list[PendingToolApproval]:
+        """List tools awaiting first-run approval.
+
+        Returns PendingToolApproval objects with enough context (description,
+        input_schema, sanitization results) for a human to make an informed decision.
+        """
+        if not self._connected:
+            await self._connect()
+        return self._security.get_pending_tools()
+
+    async def approve_tool(self, server: str, tool_name: str) -> None:
+        """Approve a pending or integrity-blocked tool, making it callable.
+
+        Use after connect_and_scan() to resolve individual tools without a
+        batch callback. Also handles re-approval after rug-pull detection.
+
+        Raises ToolBlockedError if the tool is not in an approvable state.
+        """
+        if not self._connected:
+            await self._connect()
+        self._security.approve_tool(server, tool_name)
+
+    async def deny_tool(self, server: str, tool_name: str) -> None:
+        """Deny a pending tool, preventing it from being used this session.
+
+        Records the denied hash in the registry so the system remembers
+        this definition was rejected.
+
+        Raises ToolBlockedError if the tool is not in a deniable state.
+        """
+        if not self._connected:
+            await self._connect()
+        self._security.deny_tool(server, tool_name)
 
     async def get_server_health(self) -> dict[str, ServerHealth]:
         """Check health of all configured servers."""

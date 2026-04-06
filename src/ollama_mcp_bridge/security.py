@@ -1120,6 +1120,183 @@ class SecurityGateway:
         """Get current state of all discovered tools."""
         return dict(self._tool_states)
 
+    def approve_tool(self, server: str, tool_name: str) -> None:
+        """Approve a single pending tool outside the batch callback flow.
+
+        For programmatic/interactive use after connect_and_scan(). Resolves a
+        PENDING_FIRST_APPROVAL tool to APPROVED, registers it in the approval
+        registry, and makes it callable via execute_tool().
+
+        Also handles BLOCKED_INTEGRITY (rug-pull) re-approval: if the user trusts
+        the new definition, this promotes it to APPROVED with REAPPROVED mode.
+
+        Raises ToolBlockedError if the tool is not in a resolvable state.
+        """
+        tool_key = f"{server}:{tool_name}"
+        state = self._tool_states.get(tool_key)
+
+        if state == ToolState.PENDING_FIRST_APPROVAL:
+            original_tool = self._pending_tool_schemas.get(tool_key)
+            if original_tool is None:
+                raise ToolBlockedError(
+                    f"No schema found for pending tool '{tool_key}'",
+                    reason="missing_schema",
+                )
+
+            # Find the PendingToolApproval for sanitization_result
+            pending = next((p for p in self._pending_tools if p.key == tool_key), None)
+            if pending is None:
+                raise ToolBlockedError(
+                    f"Tool '{tool_key}' not in pending list",
+                    reason="not_pending",
+                )
+
+            self._tool_states[tool_key] = ToolState.APPROVED
+            self._registry.approve(original_tool, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
+
+            approved_tool = self._make_approved_tool(
+                server, original_tool, pending.sanitization_result,
+            )
+            self._approved_tools[approved_tool.namespaced_name] = approved_tool
+            self._tools_by_server.setdefault(server, []).append(approved_tool)
+
+            # Remove from pending
+            self._pending_tools = [p for p in self._pending_tools if p.key != tool_key]
+            self._pending_tool_schemas.pop(tool_key, None)
+
+            self._audit.log_event(
+                AuditEventType.TOOL_FIRST_APPROVED,
+                server=server,
+                tool=tool_name,
+                reason="Approved via approve_tool() API",
+            )
+            logger.info("Approved tool '%s' on '%s' via API", tool_name, server)
+
+        elif state == ToolState.BLOCKED_INTEGRITY:
+            # Re-approval after rug pull — user trusts new definition
+            original_tool = self._pending_tool_schemas.get(tool_key)
+            if original_tool is None:
+                # Tool was blocked at scan time; schema is in _discovered_tools
+                discovered = self._discovered_tools.get(server, [])
+                original_tool = next(
+                    (t for t in discovered if t.name == tool_name), None,
+                )
+                if original_tool is None:
+                    raise ToolBlockedError(
+                        f"No schema found for blocked tool '{tool_key}'",
+                        reason="missing_schema",
+                    )
+
+            self._tool_states[tool_key] = ToolState.APPROVED
+            self._registry.approve(original_tool, mode=ApprovalMode.REAPPROVED)
+
+            san_result = self._sanitizer.sanitize(original_tool)
+            approved_tool = self._make_approved_tool(server, original_tool, san_result)
+            self._approved_tools[approved_tool.namespaced_name] = approved_tool
+            self._tools_by_server.setdefault(server, []).append(approved_tool)
+
+            self._audit.log_event(
+                AuditEventType.TOOL_FIRST_APPROVED,
+                server=server,
+                tool=tool_name,
+                reason="Re-approved after integrity block via approve_tool() API",
+            )
+            logger.info(
+                "Re-approved tool '%s' on '%s' after rug-pull block", tool_name, server,
+            )
+
+        elif state == ToolState.APPROVED:
+            # Already approved — idempotent, no-op
+            return
+
+        elif state is None:
+            raise ToolBlockedError(
+                f"Unknown tool '{tool_key}' — not discovered during scan",
+                reason="not_discovered",
+            )
+
+        else:
+            raise ToolBlockedError(
+                f"Tool '{tool_key}' is in state {state.value} and cannot be approved. "
+                "Only PENDING_FIRST_APPROVAL and BLOCKED_INTEGRITY tools can be approved.",
+                reason=f"state_{state.value}",
+            )
+
+    def deny_tool(self, server: str, tool_name: str) -> None:
+        """Deny or revoke a tool, removing it from callable tools.
+
+        Works on PENDING_FIRST_APPROVAL (deny before use) and APPROVED (revoke
+        mid-session). Sets state to DENIED_BY_USER and records the hash in the
+        registry so the system remembers this definition was rejected.
+
+        Raises ToolBlockedError if the tool is not in a deniable state.
+        """
+        tool_key = f"{server}:{tool_name}"
+        state = self._tool_states.get(tool_key)
+
+        if state == ToolState.PENDING_FIRST_APPROVAL:
+            original_tool = self._pending_tool_schemas.get(tool_key)
+            if original_tool is not None:
+                self._registry.deny(original_tool)
+
+            self._tool_states[tool_key] = ToolState.DENIED_BY_USER
+
+            # Remove from pending
+            self._pending_tools = [p for p in self._pending_tools if p.key != tool_key]
+            self._pending_tool_schemas.pop(tool_key, None)
+
+            self._audit.log_event(
+                AuditEventType.TOOL_FIRST_DENIED,
+                server=server,
+                tool=tool_name,
+                reason="Denied via deny_tool() API",
+            )
+            logger.info("Denied tool '%s' on '%s' via API", tool_name, server)
+
+        elif state == ToolState.APPROVED:
+            # Revoke a previously approved tool — find and record its hash
+            namespaced = f"{server}__{tool_name}"
+            approved_tool = self._approved_tools.pop(namespaced, None)
+            if approved_tool is not None:
+                # Find original ToolSchema from discovered tools to record denial
+                discovered = self._discovered_tools.get(server, [])
+                original = next((t for t in discovered if t.name == tool_name), None)
+                if original is not None:
+                    self._registry.deny(original)
+
+                # Remove from server list
+                server_tools = self._tools_by_server.get(server, [])
+                self._tools_by_server[server] = [
+                    t for t in server_tools if t.name != tool_name
+                ]
+
+            self._tool_states[tool_key] = ToolState.DENIED_BY_USER
+
+            self._audit.log_event(
+                AuditEventType.TOOL_DENIED,
+                server=server,
+                tool=tool_name,
+                reason="Revoked via deny_tool() API",
+            )
+            logger.info("Revoked tool '%s' on '%s' via API", tool_name, server)
+
+        elif state == ToolState.DENIED_BY_USER:
+            # Already denied — idempotent
+            return
+
+        elif state is None:
+            raise ToolBlockedError(
+                f"Unknown tool '{tool_key}' — not discovered during scan",
+                reason="not_discovered",
+            )
+
+        else:
+            raise ToolBlockedError(
+                f"Tool '{tool_key}' is in state {state.value} and cannot be denied. "
+                "Only PENDING_FIRST_APPROVAL and APPROVED tools can be denied.",
+                reason=f"state_{state.value}",
+            )
+
     def _make_approved_tool(
         self, server_name: str, tool: ToolSchema, san_result: SanitizationResult,
     ) -> ApprovedTool:
