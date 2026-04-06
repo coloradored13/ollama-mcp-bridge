@@ -139,14 +139,20 @@ class AuditLogger:
         tool: str = "",
         reason: str = "",
         score: float = 0.0,
+        approval_mode: str = "",
+        definition_hash: str = "",
+        confirmation_outcome: str = "",
     ) -> None:
-        """Log a non-tool-call event."""
+        """Log a non-tool-call event with optional enrichment fields."""
         self.log(AuditEntry(
             event_type=event_type,
             server_id=server,
             tool_name=tool,
             reason=reason,
             score=score,
+            approval_mode=approval_mode,
+            definition_hash=definition_hash,
+            confirmation_outcome=confirmation_outcome,
         ))
 
     def flush(self) -> None:

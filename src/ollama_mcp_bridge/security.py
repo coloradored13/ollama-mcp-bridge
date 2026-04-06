@@ -78,6 +78,7 @@ from .types import (
     ApprovalMode,
     ApprovedTool,
     AuditEventType,
+    ConfirmationOutcome,
     ExecutionResult,
     GateDecision,
     OllamaToolCall,
@@ -993,23 +994,23 @@ class ActionGate:
         tool_name: str,
         action_class: str,
         arguments: dict[str, Any],
-    ) -> bool:
+    ) -> ConfirmationOutcome:
         """Request human confirmation for a destructive action.
 
-        Returns True if confirmed, False if denied or timed out.
-        Raises ConfirmationDeniedError if no callback is set.
+        Returns a ConfirmationOutcome distinguishing between explicit denial,
+        timeout, and no callback — forensically distinct events that were
+        previously all collapsed to False.
         """
         if not self._confirmation_callback:
-            raise ConfirmationDeniedError(
-                f"No confirmation callback set for destructive tool: {tool_name}"
-            )
+            return ConfirmationOutcome.NO_CALLBACK
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 self._confirmation_callback(server, tool_name, action_class, arguments),
                 timeout=self._timeout,
             )
+            return ConfirmationOutcome.CONFIRMED if result else ConfirmationOutcome.DENIED
         except asyncio.TimeoutError:
-            return False
+            return ConfirmationOutcome.TIMEOUT
 
     def classify(self, tool: ApprovedTool) -> GateDecision:
         """Determine gate decision for a tool call."""
@@ -1169,6 +1170,8 @@ class SecurityGateway:
                 server=server,
                 tool=tool_name,
                 reason="Approved via approve_tool() API",
+                approval_mode=ApprovalMode.FIRST_RUN_EXPLICIT.value,
+                definition_hash=original_tool.definition_hash,
             )
             logger.info("Approved tool '%s' on '%s' via API", tool_name, server)
 
@@ -1200,6 +1203,8 @@ class SecurityGateway:
                 server=server,
                 tool=tool_name,
                 reason="Re-approved after integrity block via approve_tool() API",
+                approval_mode=ApprovalMode.REAPPROVED.value,
+                definition_hash=original_tool.definition_hash,
             )
             logger.info(
                 "Re-approved tool '%s' on '%s' after rug-pull block", tool_name, server,
@@ -1250,6 +1255,7 @@ class SecurityGateway:
                 server=server,
                 tool=tool_name,
                 reason="Denied via deny_tool() API",
+                definition_hash=original_tool.definition_hash if original_tool else "",
             )
             logger.info("Denied tool '%s' on '%s' via API", tool_name, server)
 
@@ -1393,6 +1399,14 @@ class SecurityGateway:
                         server=server_name,
                         tool=tool.name,
                         reason="Tool definition hash changed since last approval",
+                        definition_hash=tool.definition_hash,
+                    )
+                    self._audit.log_event(
+                        AuditEventType.TOOL_REAPPROVAL_REQUIRED,
+                        server=server_name,
+                        tool=tool.name,
+                        reason="Use approve_tool() to re-approve after reviewing the new definition",
+                        definition_hash=tool.definition_hash,
                     )
                     logger.error(
                         "RUG PULL detected: tool '%s' on '%s' definition changed!",
@@ -1449,6 +1463,7 @@ class SecurityGateway:
                         server=server_name,
                         tool=tool.name,
                         reason="First-seen tool requires approval",
+                        definition_hash=tool.definition_hash,
                     )
                     logger.info(
                         "Tool '%s' on '%s' pending first-run approval",
@@ -1499,6 +1514,8 @@ class SecurityGateway:
                     server=pending.server,
                     tool=pending.name,
                     reason="User approved first-seen tool",
+                    approval_mode=ApprovalMode.FIRST_RUN_EXPLICIT.value,
+                    definition_hash=original_tool.definition_hash,
                 )
                 logger.info("User approved first-seen tool '%s' on '%s'", pending.name, pending.server)
             else:
@@ -1513,6 +1530,7 @@ class SecurityGateway:
                     AuditEventType.TOOL_FIRST_DENIED,
                     server=pending.server,
                     tool=pending.name,
+                    definition_hash=original_tool.definition_hash,
                     reason="User denied first-seen tool",
                 )
                 logger.info("User denied first-seen tool '%s' on '%s'", pending.name, pending.server)
@@ -1590,29 +1608,54 @@ class SecurityGateway:
         # 3. Action gate (SR-7)
         gate_decision = self._gate.classify(approved)
         if gate_decision == GateDecision.NEEDS_CONFIRMATION:
-            confirmed = await self._gate.request_confirmation(
+            outcome = await self._gate.request_confirmation(
                 server=approved.server,
                 tool_name=approved.name,
                 action_class=str(approved.classification.value),
                 arguments=tool_call.arguments,
             )
 
-            if not confirmed:
+            if outcome == ConfirmationOutcome.CONFIRMED:
+                self._audit.log_event(
+                    AuditEventType.TOOL_CONFIRMED,
+                    server=approved.server,
+                    tool=approved.name,
+                    confirmation_outcome=outcome.value,
+                )
+            elif outcome == ConfirmationOutcome.TIMEOUT:
+                self._audit.log_event(
+                    AuditEventType.TOOL_TIMEOUT,
+                    server=approved.server,
+                    tool=approved.name,
+                    reason="Confirmation timed out",
+                    confirmation_outcome=outcome.value,
+                )
+                raise ConfirmationDeniedError(
+                    f"Confirmation timed out for destructive action: {approved.name}"
+                )
+            elif outcome == ConfirmationOutcome.NO_CALLBACK:
+                self._audit.log_event(
+                    AuditEventType.TOOL_DENIED,
+                    server=approved.server,
+                    tool=approved.name,
+                    reason="No confirmation callback registered",
+                    confirmation_outcome=outcome.value,
+                )
+                raise ConfirmationDeniedError(
+                    f"No confirmation callback set for destructive tool: {approved.name}"
+                )
+            else:
+                # DENIED — explicit user denial
                 self._audit.log_event(
                     AuditEventType.TOOL_DENIED,
                     server=approved.server,
                     tool=approved.name,
                     reason="User denied confirmation",
+                    confirmation_outcome=outcome.value,
                 )
                 raise ConfirmationDeniedError(
                     f"User denied destructive action: {approved.name}"
                 )
-
-            self._audit.log_event(
-                AuditEventType.TOOL_CONFIRMED,
-                server=approved.server,
-                tool=approved.name,
-            )
         elif gate_decision == GateDecision.DENIED:
             raise ToolBlockedError(
                 f"Tool '{approved.name}' denied by gate",

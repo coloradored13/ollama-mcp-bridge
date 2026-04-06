@@ -25,6 +25,7 @@ from ollama_mcp_bridge.types import (
     ActionClass,
     ApprovalMode,
     ApprovedTool,
+    ConfirmationOutcome,
     GateDecision,
     RegistryEntry,
     ResultSanitizationTier,
@@ -733,6 +734,49 @@ class TestActionGate:
             definition_hash="x",
         )
         assert gate.classify(tool) == GateDecision.APPROVED
+
+    @pytest.mark.asyncio
+    async def test_confirmation_returns_confirmed(self):
+        gate = ActionGate()
+
+        async def confirm(*_args):
+            return True
+
+        gate.set_confirmation_callback(confirm)
+        result = await gate.request_confirmation("s", "t", "DESTRUCTIVE", {})
+        assert result == ConfirmationOutcome.CONFIRMED
+
+    @pytest.mark.asyncio
+    async def test_confirmation_returns_denied(self):
+        gate = ActionGate()
+
+        async def deny(*_args):
+            return False
+
+        gate.set_confirmation_callback(deny)
+        result = await gate.request_confirmation("s", "t", "DESTRUCTIVE", {})
+        assert result == ConfirmationOutcome.DENIED
+
+    @pytest.mark.asyncio
+    async def test_confirmation_timeout_distinct_from_denial(self):
+        """Timeout returns TIMEOUT, not DENIED — forensically distinct."""
+        import asyncio
+        gate = ActionGate(timeout_seconds=0.01)
+
+        async def hang(*_args):
+            await asyncio.sleep(10)
+            return True
+
+        gate.set_confirmation_callback(hang)
+        result = await gate.request_confirmation("s", "t", "DESTRUCTIVE", {})
+        assert result == ConfirmationOutcome.TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_no_callback_returns_no_callback(self):
+        """No callback registered → NO_CALLBACK, not exception."""
+        gate = ActionGate()
+        result = await gate.request_confirmation("s", "t", "DESTRUCTIVE", {})
+        assert result == ConfirmationOutcome.NO_CALLBACK
 
 
 # --- SEC fixes: additional security hardening ---

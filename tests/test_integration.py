@@ -37,6 +37,7 @@ from ollama_mcp_bridge.types import (
     ApprovalMode,
     ApprovedTool,
     AuditEventType,
+    ConfirmationOutcome,
     ExecutionResult,
     OllamaToolCall,
     PendingToolApproval,
@@ -1045,6 +1046,189 @@ class TestApproveToolAPI:
         pending = gateway.get_pending_tools()
         assert len(pending) == 1
         assert pending[0].name == "delete_file"
+
+
+# --- PR5: Audit Fidelity and Confirmation Outcomes ---
+
+
+class TestAuditFidelity:
+    """Verify enriched audit entries and timeout/denial distinction."""
+
+    @pytest.mark.asyncio
+    async def test_approval_audit_has_mode_and_hash(self, tmp_path):
+        """Callback approval audit entry carries approval_mode and definition_hash."""
+        gateway, _ = _make_fresh_gateway(tmp_path)
+
+        async def approve_all(pending):
+            return {p.key: True for p in pending}
+
+        gateway.set_approval_callback(approve_all)
+        await gateway.connect_and_scan()
+
+        entries = gateway._audit.get_session_entries()
+        approved_events = [
+            e for e in entries if e.event_type == AuditEventType.TOOL_FIRST_APPROVED
+        ]
+        assert len(approved_events) == 3
+        for event in approved_events:
+            assert event.approval_mode == ApprovalMode.FIRST_RUN_EXPLICIT.value
+            assert event.definition_hash != ""
+
+    @pytest.mark.asyncio
+    async def test_denial_audit_has_hash(self, tmp_path):
+        """Callback denial audit entry carries definition_hash."""
+        gateway, _ = _make_fresh_gateway(tmp_path)
+
+        async def deny_all(pending):
+            return {p.key: False for p in pending}
+
+        gateway.set_approval_callback(deny_all)
+        await gateway.connect_and_scan()
+
+        entries = gateway._audit.get_session_entries()
+        denied_events = [
+            e for e in entries if e.event_type == AuditEventType.TOOL_FIRST_DENIED
+        ]
+        assert len(denied_events) == 3
+        for event in denied_events:
+            assert event.definition_hash != ""
+
+    @pytest.mark.asyncio
+    async def test_pending_audit_has_hash(self, tmp_path):
+        """Pending approval audit entry carries definition_hash."""
+        gateway, _ = _make_fresh_gateway(tmp_path)
+        await gateway.connect_and_scan()
+
+        entries = gateway._audit.get_session_entries()
+        pending_events = [
+            e for e in entries if e.event_type == AuditEventType.TOOL_PENDING_APPROVAL
+        ]
+        assert len(pending_events) == 3
+        for event in pending_events:
+            assert event.definition_hash != ""
+
+    @pytest.mark.asyncio
+    async def test_rug_pull_emits_reapproval_required(self, tmp_path):
+        """Rug-pull detection emits both RUG_PULL_DETECTED and TOOL_REAPPROVAL_REQUIRED."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        old_tool = ToolSchema(
+            server="test-server", name="echo",
+            description="Original",
+            input_schema={"type": "object", "properties": {"input": {"type": "string"}}},
+        )
+        registry.approve(old_tool)
+
+        gateway, _ = _make_fresh_gateway(
+            tmp_path, tool_names=["echo"], registry=registry,
+        )
+        await gateway.connect_and_scan()
+
+        entries = gateway._audit.get_session_entries()
+        rug_pull = [e for e in entries if e.event_type == AuditEventType.RUG_PULL_DETECTED]
+        reapproval = [e for e in entries if e.event_type == AuditEventType.TOOL_REAPPROVAL_REQUIRED]
+
+        assert len(rug_pull) == 1
+        assert rug_pull[0].definition_hash != ""
+        assert len(reapproval) == 1
+        assert reapproval[0].definition_hash != ""
+
+    @pytest.mark.asyncio
+    async def test_timeout_logged_as_timeout_not_denial(self, tmp_path):
+        """execute_tool() timeout logs TOOL_TIMEOUT, not TOOL_DENIED."""
+        import asyncio as aio
+
+        # Need an approved destructive tool
+        tool_names = ["delete_file"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        registry.approve(_make_tool_schema("delete_file"))
+
+        config = _make_config()
+        config.security.require_confirmation_for_destructive = True
+        config.security.confirmation_timeout_seconds = 0.01
+        gateway, mcp = _make_fresh_gateway(
+            tmp_path, tool_names=tool_names, config=config, registry=registry,
+        )
+        await gateway.connect_and_scan()
+
+        # Set a callback that hangs (will timeout)
+        async def hang(*_args):
+            await aio.sleep(10)
+            return True
+
+        gateway.set_confirmation_callback(hang)
+
+        tc = OllamaToolCall(
+            function_name="test-server__delete_file",
+            arguments={"input": "test"},
+        )
+        with pytest.raises(ConfirmationDeniedError, match="timed out"):
+            await gateway.execute_tool(tc)
+
+        entries = gateway._audit.get_session_entries()
+        timeout_events = [e for e in entries if e.event_type == AuditEventType.TOOL_TIMEOUT]
+        denied_events = [e for e in entries if e.event_type == AuditEventType.TOOL_DENIED]
+        assert len(timeout_events) == 1
+        assert timeout_events[0].confirmation_outcome == ConfirmationOutcome.TIMEOUT.value
+        # Timeout must NOT appear as a TOOL_DENIED event
+        assert len(denied_events) == 0
+
+    @pytest.mark.asyncio
+    async def test_explicit_denial_logged_as_denied(self, tmp_path):
+        """execute_tool() explicit denial logs TOOL_DENIED with DENIED outcome."""
+        tool_names = ["delete_file"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        registry.approve(_make_tool_schema("delete_file"))
+
+        config = _make_config()
+        config.security.require_confirmation_for_destructive = True
+        gateway, mcp = _make_fresh_gateway(
+            tmp_path, tool_names=tool_names, config=config, registry=registry,
+        )
+        await gateway.connect_and_scan()
+
+        async def deny(*_args):
+            return False
+
+        gateway.set_confirmation_callback(deny)
+
+        tc = OllamaToolCall(
+            function_name="test-server__delete_file",
+            arguments={"input": "test"},
+        )
+        with pytest.raises(ConfirmationDeniedError):
+            await gateway.execute_tool(tc)
+
+        entries = gateway._audit.get_session_entries()
+        denied_events = [e for e in entries if e.event_type == AuditEventType.TOOL_DENIED]
+        assert len(denied_events) == 1
+        assert denied_events[0].confirmation_outcome == ConfirmationOutcome.DENIED.value
+
+    @pytest.mark.asyncio
+    async def test_no_callback_logged_as_denied_with_no_callback(self, tmp_path):
+        """execute_tool() with no callback logs TOOL_DENIED with NO_CALLBACK outcome."""
+        tool_names = ["delete_file"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        registry.approve(_make_tool_schema("delete_file"))
+
+        config = _make_config()
+        config.security.require_confirmation_for_destructive = True
+        gateway, mcp = _make_fresh_gateway(
+            tmp_path, tool_names=tool_names, config=config, registry=registry,
+        )
+        await gateway.connect_and_scan()
+
+        # No callback set — should fail closed
+        tc = OllamaToolCall(
+            function_name="test-server__delete_file",
+            arguments={"input": "test"},
+        )
+        with pytest.raises(ConfirmationDeniedError):
+            await gateway.execute_tool(tc)
+
+        entries = gateway._audit.get_session_entries()
+        denied_events = [e for e in entries if e.event_type == AuditEventType.TOOL_DENIED]
+        assert len(denied_events) == 1
+        assert denied_events[0].confirmation_outcome == ConfirmationOutcome.NO_CALLBACK.value
 
 
 # --- DA GAP-2: AgentLoop multi-turn flow ---

@@ -245,6 +245,26 @@ class ValidationResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class ConfirmationOutcome(str, Enum):
+    """Outcome of a human confirmation request — forensic-grade distinction.
+
+    CONFIRMED: Human explicitly approved the action.
+    DENIED: Human explicitly denied the action.
+    TIMEOUT: Confirmation request timed out with no response.
+    NO_CALLBACK: No confirmation callback was registered (fail-closed).
+
+    The distinction between DENIED and TIMEOUT matters for forensics:
+    a timeout might be a UX issue (user didn't see the prompt), while
+    a denial is a deliberate decision. Different root causes need
+    different responses.
+    """
+
+    CONFIRMED = "CONFIRMED"
+    DENIED = "DENIED"
+    TIMEOUT = "TIMEOUT"
+    NO_CALLBACK = "NO_CALLBACK"
+
+
 class GateDecision(str, Enum):
     """Action gate decision (SAD[6])."""
 
@@ -355,9 +375,11 @@ class AuditEventType(str, Enum):
     SANITIZATION_WARN = "sanitization_warn"
     SANITIZATION_BLOCK = "sanitization_block"
     RESULT_QUARANTINED = "result_quarantined"
+    TOOL_TIMEOUT = "tool_timeout"
     TOOL_PENDING_APPROVAL = "tool_pending_approval"
     TOOL_FIRST_APPROVED = "tool_first_approved"
     TOOL_FIRST_DENIED = "tool_first_denied"
+    TOOL_REAPPROVAL_REQUIRED = "tool_reapproval_required"
     SESSION_START = "session_start"
     SESSION_END = "session_end"
 
@@ -392,6 +414,9 @@ class AuditEntry(BaseModel):
     duration_ms: float = 0.0
     model_id: str = ""
     turn: int = 0  # which turn of the multi-turn loop
+    approval_mode: str = ""  # ApprovalMode value for approval events
+    definition_hash: str = ""  # tool definition hash for approval/integrity events
+    confirmation_outcome: str = ""  # ConfirmationOutcome value for gate events
 
 
 # --- Consumer-facing types ---
