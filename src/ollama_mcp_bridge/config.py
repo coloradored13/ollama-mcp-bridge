@@ -142,17 +142,22 @@ class BridgeConfig(BaseModel):
     def check_destructive_in_allowed(self) -> "BridgeConfig":
         """Destructive tools must also be in allowed_tools if allowed_tools is non-empty."""
         for name, server in self.servers.items():
-            # Warn if allowed_tools is empty — all tools on this server will be
-            # available to the model. The default-deny spirit (SAD[1]) recommends
-            # explicit allowlists so you know exactly what the model can access.
             if not server.allowed_tools:
-                logger.warning(
-                    "Server '%s' has no allowed_tools configured — ALL tools from "
-                    "this server will be available to the model. For tighter security, "
-                    "explicitly list the tools you want to allow.",
+                # Fail-closed: empty allowlist means no tools available
+                logger.info(
+                    "Server '%s' has no allowed_tools configured — no tools from "
+                    "this server will be available (fail-closed). Add tools to "
+                    "allowed_tools to enable them.",
                     name,
                 )
-            if server.allowed_tools:
+                if server.destructive_tools:
+                    logger.warning(
+                        "Server '%s' has destructive_tools configured but "
+                        "allowed_tools is empty — destructive_tools will have "
+                        "no effect. This is likely a misconfiguration.",
+                        name,
+                    )
+            else:
                 for tool in server.destructive_tools:
                     if tool not in server.allowed_tools:
                         raise ValueError(
@@ -174,8 +179,8 @@ class BridgeConfig(BaseModel):
         if not server_config:
             return False
         if not server_config.allowed_tools:
-            # Empty allowed_tools means all tools from this server are allowed
-            return True
+            # Empty allowed_tools means NO tools from this server are allowed (fail-closed)
+            return False
         return tool in server_config.allowed_tools
 
 

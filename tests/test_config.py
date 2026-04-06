@@ -96,7 +96,7 @@ class TestBridgeConfig:
             )
 
     def test_destructive_allowed_when_allowlist_empty(self):
-        """Destructive tools OK when allowed_tools is empty (all allowed)."""
+        """Destructive tools with empty allowlist is a no-op (no tools allowed)."""
         cfg = BridgeConfig(
             servers={
                 "s": ServerConfig(
@@ -106,7 +106,9 @@ class TestBridgeConfig:
                 )
             }
         )
+        # Config is accepted but destructive_tools have no effect — no tools are allowed
         assert cfg.servers["s"].destructive_tools == ["delete"]
+        assert cfg.is_tool_allowed("s", "delete") is False
 
     def test_tool_classification(self):
         cfg = BridgeConfig(
@@ -121,11 +123,19 @@ class TestBridgeConfig:
         assert cfg.get_tool_classification("s", "read_file") == ActionClass.WRITE
 
     def test_is_tool_allowed_empty_allowlist(self):
-        """Empty allowlist means all tools allowed."""
+        """Empty allowlist means no tools allowed (fail-closed)."""
         cfg = BridgeConfig(
             servers={"s": ServerConfig(command="python", allowed_tools=[])}
         )
-        assert cfg.is_tool_allowed("s", "anything") is True
+        assert cfg.is_tool_allowed("s", "anything") is False
+
+    def test_empty_allowlist_blocks_all_tools(self):
+        """Empty allowlist blocks every tool name, not just one."""
+        cfg = BridgeConfig(
+            servers={"s": ServerConfig(command="python", allowed_tools=[])}
+        )
+        for tool in ["read", "write", "delete", "list", "execute"]:
+            assert cfg.is_tool_allowed("s", tool) is False
 
     def test_is_tool_allowed_explicit_list(self):
         cfg = BridgeConfig(

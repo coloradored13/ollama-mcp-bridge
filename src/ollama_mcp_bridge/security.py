@@ -969,6 +969,7 @@ class SecurityGateway:
 
         self._approved_tools: dict[str, ApprovedTool] = {}  # namespaced_name → tool
         self._tools_by_server: dict[str, list[ApprovedTool]] = {}
+        self._discovered_tools: dict[str, list[ToolSchema]] = {}  # server → all discovered tools
 
     def set_confirmation_callback(self, callback: ConfirmationCallback) -> None:
         """Set callback for destructive action confirmation."""
@@ -979,18 +980,28 @@ class SecurityGateway:
 
         Returns dict of server → approved tools.
 
-        FIRST-RUN BEHAVIOR: Tools that pass sanitization and are in the
-        allowlist are auto-approved and added to the hash registry on first
-        encounter. Subsequent connects detect rug pulls (definition changes)
-        via hash comparison. This means the first connection to a new server
-        trusts the tool definitions if they pass sanitization — there is no
-        interactive first-run approval step. The allowlist in config is the
-        user's explicit trust signal.
+        ALLOWLIST BEHAVIOR: Only tools explicitly listed in a server's
+        allowed_tools are candidates for approval. An empty allowed_tools
+        means no tools from that server are available (fail-closed).
+
+        FIRST-RUN BEHAVIOR: Allowlisted tools that pass sanitization are
+        auto-approved and added to the hash registry on first encounter.
+        Subsequent connects detect rug pulls (definition changes) via hash
+        comparison.
         """
         all_tools = await self._mcp.list_all_tools()
 
         for server_name, tools in all_tools.items():
+            self._discovered_tools[server_name] = tools
             approved = []
+
+            if tools and not any(self._config.is_tool_allowed(server_name, t.name) for t in tools):
+                logger.warning(
+                    "Server '%s': discovered %d tool(s) but none are in allowed_tools — "
+                    "no tools will be available. Add tools to allowed_tools in config.",
+                    server_name, len(tools),
+                )
+
             for tool in tools:
                 # Check allowlist (SR-4)
                 if not self._config.is_tool_allowed(server_name, tool.name):
@@ -1068,6 +1079,10 @@ class SecurityGateway:
     def get_approved_tools_by_server(self) -> dict[str, list[ApprovedTool]]:
         """Get approved tools grouped by server."""
         return dict(self._tools_by_server)
+
+    def get_discovered_tools_by_server(self) -> dict[str, list[ToolSchema]]:
+        """Get all discovered tools by server (includes unapproved)."""
+        return dict(self._discovered_tools)
 
     async def execute_tool(
         self,

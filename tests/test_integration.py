@@ -312,6 +312,61 @@ class TestSecurityGatewayIntegration:
         assert result.tool_name == "echo"
         mcp.call_tool.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_connect_scan_empty_allowlist_no_approved_tools(self, tmp_path):
+        """Server with empty allowlist produces zero approved tools."""
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=[],
+                ),
+            },
+            security=SecurityConfig(max_turns=5),
+        )
+        mcp = _make_mock_mcp(["echo", "add", "delete_file"])
+        audit = AuditLogger(
+            audit_file=str(tmp_path / "test-audit.jsonl"),
+            session_id="test-session",
+        )
+        gateway = SecurityGateway(mcp, config, audit)
+
+        result = await gateway.connect_and_scan()
+        approved = gateway.get_approved_tools()
+        assert len(approved) == 0
+        assert result.get("test-server", []) == []
+
+    @pytest.mark.asyncio
+    async def test_connect_scan_empty_allowlist_tracks_discovered(self, tmp_path):
+        """Discovered tools are tracked even when allowlist blocks all."""
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=[],
+                ),
+            },
+            security=SecurityConfig(max_turns=5),
+        )
+        mcp = _make_mock_mcp(["echo", "add", "delete_file"])
+        audit = AuditLogger(
+            audit_file=str(tmp_path / "test-audit.jsonl"),
+            session_id="test-session",
+        )
+        gateway = SecurityGateway(mcp, config, audit)
+
+        await gateway.connect_and_scan()
+
+        discovered = gateway.get_discovered_tools_by_server()
+        assert "test-server" in discovered
+        assert len(discovered["test-server"]) == 3
+        assert {t.name for t in discovered["test-server"]} == {"echo", "add", "delete_file"}
+
+        # But nothing was approved
+        assert len(gateway.get_approved_tools()) == 0
+
 
 # --- DA GAP-2: AgentLoop multi-turn flow ---
 
