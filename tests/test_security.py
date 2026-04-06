@@ -23,8 +23,11 @@ from ollama_mcp_bridge.security import (
 )
 from ollama_mcp_bridge.types import (
     ActionClass,
+    ApprovalMode,
     ApprovedTool,
+    ConfirmationOutcome,
     GateDecision,
+    RegistryEntry,
     ResultSanitizationTier,
     SanitizationDecision,
     ToolSchema,
@@ -469,6 +472,29 @@ class TestToolApprovalRegistry:
         registry.approve(sample_tool_schema)
         assert registry.is_approved(sample_tool_schema)
 
+    def test_approve_stores_structured_entry(self, tmp_path, sample_tool_schema: ToolSchema):
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        registry.approve(sample_tool_schema, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
+        entry = registry.get_entry(sample_tool_schema.server, sample_tool_schema.name)
+        assert entry is not None
+        assert entry.server == sample_tool_schema.server
+        assert entry.tool_name == sample_tool_schema.name
+        assert entry.approved_hash == sample_tool_schema.definition_hash
+        assert entry.approval_mode == ApprovalMode.FIRST_RUN_EXPLICIT
+        assert entry.approved_at is not None
+        assert entry.last_seen_at is not None
+
+    def test_approve_modes(self, tmp_path):
+        """Each approval path stores the correct mode."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        tool = ToolSchema(server="s", name="t", description="d", input_schema={"type": "object"})
+
+        registry.approve(tool, mode=ApprovalMode.AUTO_APPROVED)
+        assert registry.get_entry("s", "t").approval_mode == ApprovalMode.AUTO_APPROVED
+
+        registry.approve(tool, mode=ApprovalMode.REAPPROVED)
+        assert registry.get_entry("s", "t").approval_mode == ApprovalMode.REAPPROVED
+
     def test_rug_pull_detection(self, tmp_path):
         registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
 
@@ -488,11 +514,166 @@ class TestToolApprovalRegistry:
     def test_persistence(self, tmp_path, sample_tool_schema: ToolSchema):
         path = str(tmp_path / "approved.json")
         registry1 = ToolApprovalRegistry(path)
-        registry1.approve(sample_tool_schema)
+        registry1.approve(sample_tool_schema, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
 
-        # Load from same file
+        # Load from same file — structured entry survives round-trip
         registry2 = ToolApprovalRegistry(path)
         assert registry2.is_approved(sample_tool_schema)
+        entry = registry2.get_entry(sample_tool_schema.server, sample_tool_schema.name)
+        assert entry.approval_mode == ApprovalMode.FIRST_RUN_EXPLICIT
+
+    def test_legacy_migration(self, tmp_path):
+        """Old flat-hash format migrates to structured entries on load."""
+        import json
+
+        path = tmp_path / "approved.json"
+        tool = ToolSchema(server="sigma-mem", name="recall", description="d", input_schema={"type": "object"})
+        # Write old format: {"server:tool": "hash"}
+        old_data = {"sigma-mem:recall": tool.definition_hash}
+        path.write_text(json.dumps(old_data))
+
+        registry = ToolApprovalRegistry(str(path))
+
+        # Should still recognize the tool
+        assert registry.is_approved(tool)
+        assert registry.is_known("sigma-mem", "recall")
+
+        # Should have migrated to structured entry
+        entry = registry.get_entry("sigma-mem", "recall")
+        assert entry is not None
+        assert entry.server == "sigma-mem"
+        assert entry.tool_name == "recall"
+        assert entry.approved_hash == tool.definition_hash
+        assert entry.approval_mode == ApprovalMode.LEGACY
+        assert entry.approved_at is None  # legacy has no timestamp
+
+        # File should now contain structured format
+        reloaded = json.loads(path.read_text())
+        assert isinstance(reloaded["sigma-mem:recall"], dict)
+
+    def test_legacy_migration_preserves_integrity_check(self, tmp_path):
+        """Migrated legacy entries still detect rug pulls."""
+        import json
+
+        path = tmp_path / "approved.json"
+        original = ToolSchema(server="s", name="t", description="safe", input_schema={"type": "object"})
+        old_data = {"s:t": original.definition_hash}
+        path.write_text(json.dumps(old_data))
+
+        registry = ToolApprovalRegistry(str(path))
+        modified = ToolSchema(server="s", name="t", description="hijacked", input_schema={"type": "object"})
+        assert not registry.check_integrity(modified)
+
+    def test_corrupt_registry_starts_fresh(self, tmp_path):
+        """Corrupt JSON file results in empty registry, not crash."""
+        path = tmp_path / "approved.json"
+        path.write_text("not valid json{{{")
+
+        registry = ToolApprovalRegistry(str(path))
+        assert not registry.is_known("any", "tool")
+
+    def test_deny_tracking(self, tmp_path):
+        """Denied hashes are recorded and queryable."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        tool = ToolSchema(server="s", name="t", description="bad", input_schema={"type": "object"})
+
+        assert not registry.was_denied(tool)
+        registry.deny(tool)
+        assert registry.was_denied(tool)
+
+    def test_deny_then_approve_different_hash(self, tmp_path):
+        """Denying v1 then approving v2: v1 stays denied, v2 is approved."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        v1 = ToolSchema(server="s", name="t", description="bad-v1", input_schema={"type": "object"})
+        v2 = ToolSchema(server="s", name="t", description="good-v2", input_schema={"type": "object"})
+
+        registry.deny(v1)
+        registry.approve(v2, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
+
+        assert registry.was_denied(v1)
+        assert registry.is_approved(v2)
+        assert not registry.is_approved(v1)
+
+    def test_deny_preserves_existing_approval(self, tmp_path):
+        """Denying a new hash doesn't revoke an existing approval for the same tool."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        approved = ToolSchema(server="s", name="t", description="good", input_schema={"type": "object"})
+        denied = ToolSchema(server="s", name="t", description="bad", input_schema={"type": "object"})
+
+        registry.approve(approved, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
+        registry.deny(denied)
+
+        # Original approval still valid
+        assert registry.is_approved(approved)
+        assert registry.was_denied(denied)
+
+    def test_deny_idempotent(self, tmp_path):
+        """Denying the same hash twice doesn't duplicate it."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        tool = ToolSchema(server="s", name="t", description="bad", input_schema={"type": "object"})
+
+        registry.deny(tool)
+        registry.deny(tool)
+
+        entry = registry.get_entry("s", "t")
+        assert len(entry.denied_hashes) == 1
+
+    def test_touch_updates_last_seen(self, tmp_path):
+        """touch() updates last_seen_at without changing approval state."""
+        import time
+
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        tool = ToolSchema(server="s", name="t", description="d", input_schema={"type": "object"})
+        registry.approve(tool, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
+
+        entry_before = registry.get_entry("s", "t")
+        time.sleep(0.01)
+        registry.touch(tool)
+        entry_after = registry.get_entry("s", "t")
+
+        assert entry_after.last_seen_at > entry_before.last_seen_at
+        assert entry_after.approval_mode == ApprovalMode.FIRST_RUN_EXPLICIT  # unchanged
+
+    def test_reapproval_updates_hash_and_mode(self, tmp_path):
+        """Re-approving after rug-pull stores new hash with REAPPROVED mode."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        v1 = ToolSchema(server="s", name="t", description="v1", input_schema={"type": "object"})
+        v2 = ToolSchema(server="s", name="t", description="v2-updated", input_schema={"type": "object"})
+
+        registry.approve(v1, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
+        assert not registry.check_integrity(v2)  # rug pull detected
+
+        registry.approve(v2, mode=ApprovalMode.REAPPROVED)
+        assert registry.is_approved(v2)
+        assert not registry.is_approved(v1)  # old hash no longer matches
+        entry = registry.get_entry("s", "t")
+        assert entry.approval_mode == ApprovalMode.REAPPROVED
+
+    def test_check_integrity_deny_only_entry(self, tmp_path):
+        """A deny-only entry (no approval) does not trigger rug pull false positive."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        tool = ToolSchema(server="s", name="t", description="d", input_schema={"type": "object"})
+
+        registry.deny(tool)
+        # Different hash presented — but there's no approved hash, so not a rug pull
+        other = ToolSchema(server="s", name="t", description="other", input_schema={"type": "object"})
+        assert registry.check_integrity(other)
+
+    def test_deny_only_entry_not_known(self, tmp_path):
+        """A deny-only entry is NOT considered 'known' — prevents auto-approve bypass."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        tool = ToolSchema(server="s", name="t", description="d", input_schema={"type": "object"})
+
+        registry.deny(tool)
+        # Entry exists but has no approved_hash — is_known must return False
+        assert not registry.is_known("s", "t")
+        # After approving, now it's known
+        registry.approve(tool, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
+        assert registry.is_known("s", "t")
+
+    def test_get_entry_returns_none_for_unknown(self, tmp_path):
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        assert registry.get_entry("no", "such") is None
 
 
 # --- Rate Limiter ---
@@ -553,6 +734,49 @@ class TestActionGate:
             definition_hash="x",
         )
         assert gate.classify(tool) == GateDecision.APPROVED
+
+    @pytest.mark.asyncio
+    async def test_confirmation_returns_confirmed(self):
+        gate = ActionGate()
+
+        async def confirm(*_args):
+            return True
+
+        gate.set_confirmation_callback(confirm)
+        result = await gate.request_confirmation("s", "t", "DESTRUCTIVE", {})
+        assert result == ConfirmationOutcome.CONFIRMED
+
+    @pytest.mark.asyncio
+    async def test_confirmation_returns_denied(self):
+        gate = ActionGate()
+
+        async def deny(*_args):
+            return False
+
+        gate.set_confirmation_callback(deny)
+        result = await gate.request_confirmation("s", "t", "DESTRUCTIVE", {})
+        assert result == ConfirmationOutcome.DENIED
+
+    @pytest.mark.asyncio
+    async def test_confirmation_timeout_distinct_from_denial(self):
+        """Timeout returns TIMEOUT, not DENIED — forensically distinct."""
+        import asyncio
+        gate = ActionGate(timeout_seconds=0.01)
+
+        async def hang(*_args):
+            await asyncio.sleep(10)
+            return True
+
+        gate.set_confirmation_callback(hang)
+        result = await gate.request_confirmation("s", "t", "DESTRUCTIVE", {})
+        assert result == ConfirmationOutcome.TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_no_callback_returns_no_callback(self):
+        """No callback registered → NO_CALLBACK, not exception."""
+        gate = ActionGate()
+        result = await gate.request_confirmation("s", "t", "DESTRUCTIVE", {})
+        assert result == ConfirmationOutcome.NO_CALLBACK
 
 
 # --- SEC fixes: additional security hardening ---

@@ -89,6 +89,39 @@ class ActionClass(str, Enum):
     DESTRUCTIVE = "DESTRUCTIVE"
 
 
+class ApprovalMode(str, Enum):
+    """How a tool was approved — tracks the trust provenance of each registry entry.
+
+    FIRST_RUN_EXPLICIT: Human approved via approval callback during first-run scan.
+    AUTO_APPROVED: auto_approve_first_seen=True or require_first_run_approval=False.
+    REAPPROVED: Re-approved after rug-pull detection (hash changed, user re-confirmed).
+    LEGACY: Migrated from old flat-hash registry format (pre-PR3). No metadata available.
+    """
+
+    FIRST_RUN_EXPLICIT = "first_run_explicit"
+    AUTO_APPROVED = "auto_approved"
+    REAPPROVED = "reapproved"
+    LEGACY = "legacy"
+
+
+class RegistryEntry(BaseModel):
+    """Structured approval record for a single tool in the registry.
+
+    Replaces the old flat {key: hash} format with rich metadata that
+    answers: who approved this, when, how, and was it ever denied?
+    """
+
+    server: str
+    tool_name: str
+    approved_hash: str
+    approved_at: datetime | None = None
+    approval_mode: ApprovalMode = ApprovalMode.LEGACY
+    classification: str = ""  # READ/WRITE/DESTRUCTIVE — informational
+    notes: str | None = None
+    last_seen_at: datetime | None = None
+    denied_hashes: list[str] = Field(default_factory=list)
+
+
 class ToolState(str, Enum):
     """State of a tool in the first-run approval pipeline.
 
@@ -212,6 +245,26 @@ class ValidationResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class ConfirmationOutcome(str, Enum):
+    """Outcome of a human confirmation request — forensic-grade distinction.
+
+    CONFIRMED: Human explicitly approved the action.
+    DENIED: Human explicitly denied the action.
+    TIMEOUT: Confirmation request timed out with no response.
+    NO_CALLBACK: No confirmation callback was registered (fail-closed).
+
+    The distinction between DENIED and TIMEOUT matters for forensics:
+    a timeout might be a UX issue (user didn't see the prompt), while
+    a denial is a deliberate decision. Different root causes need
+    different responses.
+    """
+
+    CONFIRMED = "CONFIRMED"
+    DENIED = "DENIED"
+    TIMEOUT = "TIMEOUT"
+    NO_CALLBACK = "NO_CALLBACK"
+
+
 class GateDecision(str, Enum):
     """Action gate decision (SAD[6])."""
 
@@ -322,9 +375,11 @@ class AuditEventType(str, Enum):
     SANITIZATION_WARN = "sanitization_warn"
     SANITIZATION_BLOCK = "sanitization_block"
     RESULT_QUARANTINED = "result_quarantined"
+    TOOL_TIMEOUT = "tool_timeout"
     TOOL_PENDING_APPROVAL = "tool_pending_approval"
     TOOL_FIRST_APPROVED = "tool_first_approved"
     TOOL_FIRST_DENIED = "tool_first_denied"
+    TOOL_REAPPROVAL_REQUIRED = "tool_reapproval_required"
     SESSION_START = "session_start"
     SESSION_END = "session_end"
 
@@ -359,6 +414,9 @@ class AuditEntry(BaseModel):
     duration_ms: float = 0.0
     model_id: str = ""
     turn: int = 0  # which turn of the multi-turn loop
+    approval_mode: str = ""  # ApprovalMode value for approval events
+    definition_hash: str = ""  # tool definition hash for approval/integrity events
+    confirmation_outcome: str = ""  # ConfirmationOutcome value for gate events
 
 
 # --- Consumer-facing types ---

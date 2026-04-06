@@ -37,9 +37,12 @@ from .errors import (
 )
 from .types import (
     ActionClass,
+    ApprovalMode,
     AuditEntry,
     BridgeResult,
+    ConfirmationOutcome,
     PendingToolApproval,
+    RegistryEntry,
     ScanResult,
     ServerHealth,
     StreamEvent,
@@ -62,6 +65,9 @@ __all__ = [
     "BridgeResult",
     "ScanResult",
     "PendingToolApproval",
+    "RegistryEntry",
+    "ApprovalMode",
+    "ConfirmationOutcome",
     "ToolState",
     "StreamEvent",
     "StreamEventType",

@@ -56,6 +56,7 @@ import math
 import re
 import time
 import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -74,12 +75,15 @@ from .errors import (
 from .mcp_client import MCPClientManager
 from .types import (
     ActionClass,
+    ApprovalMode,
     ApprovedTool,
     AuditEventType,
+    ConfirmationOutcome,
     ExecutionResult,
     GateDecision,
     OllamaToolCall,
     PendingToolApproval,
+    RegistryEntry,
     ResultSanitizationTier,
     SanitizationDecision,
     SanitizationResult,
@@ -672,7 +676,7 @@ class ResultSanitizer:
 
 
 class ToolApprovalRegistry:
-    """Persistent hash registry for rug-pull attack detection.
+    """Persistent structured registry for tool approval and rug-pull detection.
 
     WHAT IS A RUG PULL: An MCP server initially presents a safe tool definition
     to gain user approval, then silently changes the definition later. The tool
@@ -681,36 +685,61 @@ class ToolApprovalRegistry:
     was swapped post-approval to exfiltrate WhatsApp history.
 
     HOW WE DEFEND: When a tool is first approved, we store SHA-256(definition)
-    to disk. On every subsequent connection, we recompute the hash. If it doesn't
-    match, the tool is blocked and the user must explicitly re-approve it.
+    to disk as a structured RegistryEntry with timestamps, approval mode, and
+    optional deny tracking. On every subsequent connection, we recompute the hash.
+    If it doesn't match, the tool is blocked and the user must explicitly re-approve.
 
-    The hash covers name + description + input_schema (the full behavioral
-    definition). A legitimate tool update (new parameters, better description)
-    will trigger re-approval — this is by design, not a bug. The cost of a
-    false positive (re-approving a legitimate update) is far lower than the
-    cost of a false negative (missing a rug pull).
+    MIGRATION: Old flat-hash registries ({"server:tool": "hash"}) are auto-migrated
+    to structured entries with approval_mode=LEGACY on first load.
     """
 
     def __init__(self, registry_path: str = "~/.ollama-mcp-bridge/approved_tools.json"):
         self._path = Path(registry_path).expanduser()
-        self._hashes: dict[str, str] = {}  # "server:tool" → hash
+        self._entries: dict[str, RegistryEntry] = {}  # "server:tool" → structured entry
         self._load()
 
     def _load(self) -> None:
-        """Load approved hashes from disk."""
-        if self._path.exists():
-            try:
-                with open(self._path) as f:
-                    self._hashes = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                logger.warning("Could not load tool approval registry, starting fresh")
-                self._hashes = {}
+        """Load registry from disk, auto-migrating old flat-hash format."""
+        if not self._path.exists():
+            return
+        try:
+            with open(self._path) as f:
+                raw = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Could not load tool approval registry, starting fresh")
+            return
+
+        migrated = False
+        for key, value in raw.items():
+            if isinstance(value, str):
+                # Old format: {"server:tool": "hash"} — migrate to structured entry
+                parts = key.split(":", 1)
+                server = parts[0] if len(parts) == 2 else ""
+                tool_name = parts[1] if len(parts) == 2 else key
+                self._entries[key] = RegistryEntry(
+                    server=server,
+                    tool_name=tool_name,
+                    approved_hash=value,
+                    approved_at=None,
+                    approval_mode=ApprovalMode.LEGACY,
+                )
+                migrated = True
+            elif isinstance(value, dict):
+                # New structured format
+                self._entries[key] = RegistryEntry(**value)
+            else:
+                logger.warning("Skipping invalid registry entry for key '%s'", key)
+
+        if migrated:
+            logger.info("Migrated %d legacy registry entries to structured format", len(self._entries))
+            self._save()
 
     def _save(self) -> None:
-        """Save approved hashes to disk."""
+        """Persist registry to disk in structured format."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        data = {key: entry.model_dump(mode="json") for key, entry in self._entries.items()}
         with open(self._path, "w") as f:
-            json.dump(self._hashes, f, indent=2)
+            json.dump(data, f, indent=2)
 
     def _key(self, server: str, tool: str) -> str:
         return f"{server}:{tool}"
@@ -718,27 +747,114 @@ class ToolApprovalRegistry:
     def is_approved(self, tool: ToolSchema) -> bool:
         """Check if a tool's definition hash matches the approved hash."""
         key = self._key(tool.server, tool.name)
-        if key not in self._hashes:
+        entry = self._entries.get(key)
+        if entry is None:
             return False
-        return self._hashes[key] == tool.definition_hash
+        return entry.approved_hash == tool.definition_hash
 
     def is_known(self, server: str, tool: str) -> bool:
-        """Check if a tool has ever been approved."""
-        return self._key(server, tool) in self._hashes
+        """Check if a tool has been approved (has a non-empty approved_hash).
 
-    def approve(self, tool: ToolSchema) -> None:
-        """Register a tool's hash as approved."""
+        Deny-only entries (approved_hash='') do NOT count as known.
+        This prevents a previously-denied tool from being auto-approved
+        on the next scan via the 'known tool, hash matches' fast path.
+        """
+        entry = self._entries.get(self._key(server, tool))
+        if entry is None:
+            return False
+        return bool(entry.approved_hash)
+
+    def approve(
+        self,
+        tool: ToolSchema,
+        mode: ApprovalMode = ApprovalMode.AUTO_APPROVED,
+    ) -> None:
+        """Register or update a tool's approval with structured metadata."""
         key = self._key(tool.server, tool.name)
-        self._hashes[key] = tool.definition_hash
+        now = datetime.now(timezone.utc)
+        existing = self._entries.get(key)
+
+        if existing is not None:
+            # Update existing entry — preserve denied_hashes, update hash and timestamps
+            self._entries[key] = RegistryEntry(
+                server=tool.server,
+                tool_name=tool.name,
+                approved_hash=tool.definition_hash,
+                approved_at=now,
+                approval_mode=mode,
+                classification=existing.classification,
+                notes=existing.notes,
+                last_seen_at=now,
+                denied_hashes=existing.denied_hashes,
+            )
+        else:
+            self._entries[key] = RegistryEntry(
+                server=tool.server,
+                tool_name=tool.name,
+                approved_hash=tool.definition_hash,
+                approved_at=now,
+                approval_mode=mode,
+                last_seen_at=now,
+            )
         self._save()
+
+    def deny(self, tool: ToolSchema) -> None:
+        """Record a denied tool definition hash.
+
+        If the tool has an existing entry (was previously approved), the denied
+        hash is appended to denied_hashes. If not, a new entry is created with
+        only denied_hashes populated and no approved_hash.
+        """
+        key = self._key(tool.server, tool.name)
+        existing = self._entries.get(key)
+
+        if existing is not None:
+            if tool.definition_hash not in existing.denied_hashes:
+                denied = list(existing.denied_hashes) + [tool.definition_hash]
+                self._entries[key] = existing.model_copy(update={"denied_hashes": denied})
+        else:
+            self._entries[key] = RegistryEntry(
+                server=tool.server,
+                tool_name=tool.name,
+                approved_hash="",
+                approval_mode=ApprovalMode.LEGACY,
+                denied_hashes=[tool.definition_hash],
+            )
+        self._save()
+
+    def was_denied(self, tool: ToolSchema) -> bool:
+        """Check if this exact tool definition was previously denied."""
+        key = self._key(tool.server, tool.name)
+        entry = self._entries.get(key)
+        if entry is None:
+            return False
+        return tool.definition_hash in entry.denied_hashes
+
+    def touch(self, tool: ToolSchema) -> None:
+        """Update last_seen_at for a known tool without changing approval state."""
+        key = self._key(tool.server, tool.name)
+        entry = self._entries.get(key)
+        if entry is not None:
+            self._entries[key] = entry.model_copy(
+                update={"last_seen_at": datetime.now(timezone.utc)},
+            )
+            self._save()
+
+    def get_entry(self, server: str, tool: str) -> RegistryEntry | None:
+        """Get the structured registry entry for a tool, or None."""
+        return self._entries.get(self._key(server, tool))
 
     def check_integrity(self, tool: ToolSchema) -> bool:
         """Check tool integrity. Returns True if OK, False if rug pull detected."""
         key = self._key(tool.server, tool.name)
-        if key not in self._hashes:
+        entry = self._entries.get(key)
+        if entry is None:
             # New tool — not a rug pull, just unapproved
             return True
-        return self._hashes[key] == tool.definition_hash
+        # Entry with empty approved_hash (deny-only record) is not a rug pull
+        if not entry.approved_hash:
+            return True
+        return entry.approved_hash == tool.definition_hash
 
 
 # --- Rate Limiter (SAD[8]) ---
@@ -878,23 +994,23 @@ class ActionGate:
         tool_name: str,
         action_class: str,
         arguments: dict[str, Any],
-    ) -> bool:
+    ) -> ConfirmationOutcome:
         """Request human confirmation for a destructive action.
 
-        Returns True if confirmed, False if denied or timed out.
-        Raises ConfirmationDeniedError if no callback is set.
+        Returns a ConfirmationOutcome distinguishing between explicit denial,
+        timeout, and no callback — forensically distinct events that were
+        previously all collapsed to False.
         """
         if not self._confirmation_callback:
-            raise ConfirmationDeniedError(
-                f"No confirmation callback set for destructive tool: {tool_name}"
-            )
+            return ConfirmationOutcome.NO_CALLBACK
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 self._confirmation_callback(server, tool_name, action_class, arguments),
                 timeout=self._timeout,
             )
+            return ConfirmationOutcome.CONFIRMED if result else ConfirmationOutcome.DENIED
         except asyncio.TimeoutError:
-            return False
+            return ConfirmationOutcome.TIMEOUT
 
     def classify(self, tool: ApprovedTool) -> GateDecision:
         """Determine gate decision for a tool call."""
@@ -1005,6 +1121,203 @@ class SecurityGateway:
         """Get current state of all discovered tools."""
         return dict(self._tool_states)
 
+    def approve_tool(self, server: str, tool_name: str) -> None:
+        """Approve a single pending tool outside the batch callback flow.
+
+        For programmatic/interactive use after connect_and_scan(). Resolves a
+        PENDING_FIRST_APPROVAL tool to APPROVED, registers it in the approval
+        registry, and makes it callable via execute_tool().
+
+        Also handles BLOCKED_INTEGRITY (rug-pull) re-approval: if the user trusts
+        the new definition, this promotes it to APPROVED with REAPPROVED mode.
+
+        Raises ToolBlockedError if the tool is not in a resolvable state.
+        """
+        tool_key = f"{server}:{tool_name}"
+        state = self._tool_states.get(tool_key)
+
+        if state == ToolState.PENDING_FIRST_APPROVAL:
+            original_tool = self._pending_tool_schemas.get(tool_key)
+            if original_tool is None:
+                raise ToolBlockedError(
+                    f"No schema found for pending tool '{tool_key}'",
+                    reason="missing_schema",
+                )
+
+            # Find the PendingToolApproval for sanitization_result
+            pending = next((p for p in self._pending_tools if p.key == tool_key), None)
+            if pending is None:
+                raise ToolBlockedError(
+                    f"Tool '{tool_key}' not in pending list",
+                    reason="not_pending",
+                )
+
+            self._tool_states[tool_key] = ToolState.APPROVED
+            self._registry.approve(original_tool, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
+
+            approved_tool = self._make_approved_tool(
+                server, original_tool, pending.sanitization_result,
+            )
+            self._approved_tools[approved_tool.namespaced_name] = approved_tool
+            self._tools_by_server.setdefault(server, []).append(approved_tool)
+
+            # Remove from pending
+            self._pending_tools = [p for p in self._pending_tools if p.key != tool_key]
+            self._pending_tool_schemas.pop(tool_key, None)
+
+            self._audit.log_event(
+                AuditEventType.TOOL_FIRST_APPROVED,
+                server=server,
+                tool=tool_name,
+                reason="Approved via approve_tool() API",
+                approval_mode=ApprovalMode.FIRST_RUN_EXPLICIT.value,
+                definition_hash=original_tool.definition_hash,
+            )
+            logger.info("Approved tool '%s' on '%s' via API", tool_name, server)
+
+        elif state == ToolState.BLOCKED_INTEGRITY:
+            # Re-approval after rug pull — user trusts new definition
+            original_tool = self._pending_tool_schemas.get(tool_key)
+            if original_tool is None:
+                # Tool was blocked at scan time; schema is in _discovered_tools
+                discovered = self._discovered_tools.get(server, [])
+                original_tool = next(
+                    (t for t in discovered if t.name == tool_name), None,
+                )
+                if original_tool is None:
+                    raise ToolBlockedError(
+                        f"No schema found for blocked tool '{tool_key}'",
+                        reason="missing_schema",
+                    )
+
+            self._tool_states[tool_key] = ToolState.APPROVED
+            self._registry.approve(original_tool, mode=ApprovalMode.REAPPROVED)
+
+            san_result = self._sanitizer.sanitize(original_tool)
+            approved_tool = self._make_approved_tool(server, original_tool, san_result)
+            self._approved_tools[approved_tool.namespaced_name] = approved_tool
+            # Dedup guard: remove stale entry before appending (defensive)
+            server_tools = self._tools_by_server.setdefault(server, [])
+            self._tools_by_server[server] = [
+                t for t in server_tools if t.name != tool_name
+            ]
+            self._tools_by_server[server].append(approved_tool)
+
+            self._audit.log_event(
+                AuditEventType.TOOL_FIRST_APPROVED,
+                server=server,
+                tool=tool_name,
+                reason="Re-approved after integrity block via approve_tool() API",
+                approval_mode=ApprovalMode.REAPPROVED.value,
+                definition_hash=original_tool.definition_hash,
+            )
+            logger.info(
+                "Re-approved tool '%s' on '%s' after rug-pull block", tool_name, server,
+            )
+
+        elif state == ToolState.APPROVED:
+            # Already approved — idempotent, no-op
+            return
+
+        elif state is None:
+            raise ToolBlockedError(
+                f"Unknown tool '{tool_key}' — not discovered during scan",
+                reason="not_discovered",
+            )
+
+        else:
+            raise ToolBlockedError(
+                f"Tool '{tool_key}' is in state {state.value} and cannot be approved. "
+                "Only PENDING_FIRST_APPROVAL and BLOCKED_INTEGRITY tools can be approved.",
+                reason=f"state_{state.value}",
+            )
+
+    def deny_tool(self, server: str, tool_name: str) -> None:
+        """Deny or revoke a tool, removing it from callable tools.
+
+        Works on PENDING_FIRST_APPROVAL (deny before use) and APPROVED (revoke
+        mid-session). Sets state to DENIED_BY_USER and records the hash in the
+        registry so the system remembers this definition was rejected.
+
+        Raises ToolBlockedError if the tool is not in a deniable state.
+        """
+        tool_key = f"{server}:{tool_name}"
+        state = self._tool_states.get(tool_key)
+
+        if state == ToolState.PENDING_FIRST_APPROVAL:
+            original_tool = self._pending_tool_schemas.get(tool_key)
+            if original_tool is not None:
+                self._registry.deny(original_tool)
+
+            self._tool_states[tool_key] = ToolState.DENIED_BY_USER
+
+            # Remove from pending
+            self._pending_tools = [p for p in self._pending_tools if p.key != tool_key]
+            self._pending_tool_schemas.pop(tool_key, None)
+
+            self._audit.log_event(
+                AuditEventType.TOOL_FIRST_DENIED,
+                server=server,
+                tool=tool_name,
+                reason="Denied via deny_tool() API",
+                definition_hash=original_tool.definition_hash if original_tool else "",
+            )
+            logger.info("Denied tool '%s' on '%s' via API", tool_name, server)
+
+        elif state == ToolState.APPROVED:
+            # Revoke a previously approved tool — find and record its hash
+            namespaced = f"{server}__{tool_name}"
+            approved_tool = self._approved_tools.pop(namespaced, None)
+            if approved_tool is not None:
+                # Find original ToolSchema from discovered tools to record denial
+                discovered = self._discovered_tools.get(server, [])
+                original = next((t for t in discovered if t.name == tool_name), None)
+                if original is not None:
+                    self._registry.deny(original)
+
+                # Remove from server list
+                server_tools = self._tools_by_server.get(server, [])
+                self._tools_by_server[server] = [
+                    t for t in server_tools if t.name != tool_name
+                ]
+
+            self._tool_states[tool_key] = ToolState.DENIED_BY_USER
+
+            # Get hash for audit from the discovered tool or the approved tool
+            revoked_hash = ""
+            discovered = self._discovered_tools.get(server, [])
+            original = next((t for t in discovered if t.name == tool_name), None)
+            if original is not None:
+                revoked_hash = original.definition_hash
+            elif approved_tool is not None:
+                revoked_hash = approved_tool.definition_hash
+
+            self._audit.log_event(
+                AuditEventType.TOOL_DENIED,
+                server=server,
+                tool=tool_name,
+                reason="Revoked via deny_tool() API",
+                definition_hash=revoked_hash,
+            )
+            logger.info("Revoked tool '%s' on '%s' via API", tool_name, server)
+
+        elif state == ToolState.DENIED_BY_USER:
+            # Already denied — idempotent
+            return
+
+        elif state is None:
+            raise ToolBlockedError(
+                f"Unknown tool '{tool_key}' — not discovered during scan",
+                reason="not_discovered",
+            )
+
+        else:
+            raise ToolBlockedError(
+                f"Tool '{tool_key}' is in state {state.value} and cannot be denied. "
+                "Only PENDING_FIRST_APPROVAL and APPROVED tools can be denied.",
+                reason=f"state_{state.value}",
+            )
+
     def _make_approved_tool(
         self, server_name: str, tool: ToolSchema, san_result: SanitizationResult,
     ) -> ApprovedTool:
@@ -1101,6 +1414,14 @@ class SecurityGateway:
                         server=server_name,
                         tool=tool.name,
                         reason="Tool definition hash changed since last approval",
+                        definition_hash=tool.definition_hash,
+                    )
+                    self._audit.log_event(
+                        AuditEventType.TOOL_REAPPROVAL_REQUIRED,
+                        server=server_name,
+                        tool=tool.name,
+                        reason="Use approve_tool() to re-approve after reviewing the new definition",
+                        definition_hash=tool.definition_hash,
                     )
                     logger.error(
                         "RUG PULL detected: tool '%s' on '%s' definition changed!",
@@ -1113,7 +1434,7 @@ class SecurityGateway:
                 if self._registry.is_known(server_name, tool.name):
                     # Known tool, hash matches (integrity check passed above)
                     self._tool_states[tool_key] = ToolState.APPROVED
-                    self._registry.approve(tool)  # re-persist (idempotent)
+                    self._registry.touch(tool)  # update last_seen_at (idempotent)
                     approved_tool = self._make_approved_tool(server_name, tool, san_result)
                     approved_for_server.append(approved_tool)
                     self._approved_tools[approved_tool.namespaced_name] = approved_tool
@@ -1121,7 +1442,7 @@ class SecurityGateway:
                 elif self._security.auto_approve_first_seen:
                     # Config: auto-approve first-seen (dev/test mode)
                     self._tool_states[tool_key] = ToolState.APPROVED
-                    self._registry.approve(tool)
+                    self._registry.approve(tool, mode=ApprovalMode.AUTO_APPROVED)
                     approved_tool = self._make_approved_tool(server_name, tool, san_result)
                     approved_for_server.append(approved_tool)
                     self._approved_tools[approved_tool.namespaced_name] = approved_tool
@@ -1133,7 +1454,7 @@ class SecurityGateway:
                 elif not self._security.require_first_run_approval:
                     # Config: legacy mode — first-seen tools auto-approved
                     self._tool_states[tool_key] = ToolState.APPROVED
-                    self._registry.approve(tool)
+                    self._registry.approve(tool, mode=ApprovalMode.AUTO_APPROVED)
                     approved_tool = self._make_approved_tool(server_name, tool, san_result)
                     approved_for_server.append(approved_tool)
                     self._approved_tools[approved_tool.namespaced_name] = approved_tool
@@ -1157,6 +1478,7 @@ class SecurityGateway:
                         server=server_name,
                         tool=tool.name,
                         reason="First-seen tool requires approval",
+                        definition_hash=tool.definition_hash,
                     )
                     logger.info(
                         "Tool '%s' on '%s' pending first-run approval",
@@ -1190,7 +1512,7 @@ class SecurityGateway:
                 # Approved by user
                 self._tool_states[tool_key] = ToolState.APPROVED
                 original_tool = self._pending_tool_schemas[tool_key]
-                self._registry.approve(original_tool)
+                self._registry.approve(original_tool, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
 
                 approved_tool = self._make_approved_tool(
                     pending.server,
@@ -1207,11 +1529,15 @@ class SecurityGateway:
                     server=pending.server,
                     tool=pending.name,
                     reason="User approved first-seen tool",
+                    approval_mode=ApprovalMode.FIRST_RUN_EXPLICIT.value,
+                    definition_hash=original_tool.definition_hash,
                 )
                 logger.info("User approved first-seen tool '%s' on '%s'", pending.name, pending.server)
             else:
-                # Denied by user
+                # Denied by user — record hash so we remember this decision
                 self._tool_states[tool_key] = ToolState.DENIED_BY_USER
+                original_tool = self._pending_tool_schemas[tool_key]
+                self._registry.deny(original_tool)
                 scan_result.denied.append((pending.server, pending.name))
                 resolved.append(pending)
 
@@ -1219,6 +1545,7 @@ class SecurityGateway:
                     AuditEventType.TOOL_FIRST_DENIED,
                     server=pending.server,
                     tool=pending.name,
+                    definition_hash=original_tool.definition_hash,
                     reason="User denied first-seen tool",
                 )
                 logger.info("User denied first-seen tool '%s' on '%s'", pending.name, pending.server)
@@ -1296,29 +1623,55 @@ class SecurityGateway:
         # 3. Action gate (SR-7)
         gate_decision = self._gate.classify(approved)
         if gate_decision == GateDecision.NEEDS_CONFIRMATION:
-            confirmed = await self._gate.request_confirmation(
+            outcome = await self._gate.request_confirmation(
                 server=approved.server,
                 tool_name=approved.name,
                 action_class=str(approved.classification.value),
                 arguments=tool_call.arguments,
             )
 
-            if not confirmed:
+            if outcome == ConfirmationOutcome.CONFIRMED:
+                self._audit.log_event(
+                    AuditEventType.TOOL_CONFIRMED,
+                    server=approved.server,
+                    tool=approved.name,
+                    confirmation_outcome=outcome.value,
+                    definition_hash=approved.definition_hash,
+                )
+            elif outcome == ConfirmationOutcome.TIMEOUT:
+                self._audit.log_event(
+                    AuditEventType.TOOL_TIMEOUT,
+                    server=approved.server,
+                    tool=approved.name,
+                    reason="Confirmation timed out",
+                    confirmation_outcome=outcome.value,
+                )
+                raise ConfirmationDeniedError(
+                    f"Confirmation timed out for destructive action: {approved.name}"
+                )
+            elif outcome == ConfirmationOutcome.NO_CALLBACK:
+                self._audit.log_event(
+                    AuditEventType.TOOL_DENIED,
+                    server=approved.server,
+                    tool=approved.name,
+                    reason="No confirmation callback registered",
+                    confirmation_outcome=outcome.value,
+                )
+                raise ConfirmationDeniedError(
+                    f"No confirmation callback set for destructive tool: {approved.name}"
+                )
+            else:
+                # DENIED — explicit user denial
                 self._audit.log_event(
                     AuditEventType.TOOL_DENIED,
                     server=approved.server,
                     tool=approved.name,
                     reason="User denied confirmation",
+                    confirmation_outcome=outcome.value,
                 )
                 raise ConfirmationDeniedError(
                     f"User denied destructive action: {approved.name}"
                 )
-
-            self._audit.log_event(
-                AuditEventType.TOOL_CONFIRMED,
-                server=approved.server,
-                tool=approved.name,
-            )
         elif gate_decision == GateDecision.DENIED:
             raise ToolBlockedError(
                 f"Tool '{approved.name}' denied by gate",
