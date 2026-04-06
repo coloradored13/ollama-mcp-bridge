@@ -1,0 +1,137 @@
+"""Structured audit logging (SAD[5]).
+
+Append-only JSON-L format. Every tool call is logged with:
+timestamp, session_id, event_type, server, tool, params_hash, result metrics,
+decision, duration. Async-buffered, thread-safe.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from .types import ActionClass, AuditEntry, AuditEventType
+
+logger = logging.getLogger(__name__)
+
+
+class AuditLogger:
+    """Structured audit logger writing JSON-L to disk.
+
+    Entries are buffered and flushed periodically or on explicit flush.
+    """
+
+    def __init__(
+        self,
+        audit_file: str = "~/.ollama-mcp-bridge/audit.jsonl",
+        session_id: str = "",
+    ):
+        self._path = Path(audit_file).expanduser()
+        self._session_id = session_id
+        self._buffer: list[AuditEntry] = []
+        self._buffer_limit = 10
+        self._ensure_directory()
+
+    def _ensure_directory(self) -> None:
+        """Create audit log directory if it doesn't exist."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(self, entry: AuditEntry) -> None:
+        """Add an audit entry to the buffer."""
+        if not entry.session_id:
+            entry.session_id = self._session_id
+        self._buffer.append(entry)
+        if len(self._buffer) >= self._buffer_limit:
+            self.flush()
+
+    def log_tool_call(
+        self,
+        server: str,
+        tool: str,
+        action_class: ActionClass,
+        params: dict[str, Any],
+        result_content: str = "",
+        decision: str = "ALLOWED",
+        reason: str = "",
+        score: float = 0.0,
+        duration_ms: float = 0.0,
+        model_id: str = "",
+        turn: int = 0,
+    ) -> None:
+        """Log a tool call event with computed hashes."""
+        params_json = json.dumps(params, sort_keys=True, default=str)
+        params_hash = hashlib.sha256(params_json.encode()).hexdigest()
+        params_summary = params_json[:200]
+
+        result_hash = ""
+        result_size = 0
+        if result_content:
+            result_size = len(result_content.encode())
+            result_hash = hashlib.sha256(result_content.encode()).hexdigest()
+
+        self.log(AuditEntry(
+            event_type=AuditEventType.TOOL_CALL,
+            server_id=server,
+            tool_name=tool,
+            action_class=action_class,
+            params_hash=params_hash,
+            params_summary=params_summary,
+            result_size=result_size,
+            result_hash=result_hash,
+            decision=decision,
+            reason=reason,
+            score=score,
+            duration_ms=duration_ms,
+            model_id=model_id,
+            turn=turn,
+        ))
+
+    def log_event(
+        self,
+        event_type: AuditEventType,
+        server: str = "",
+        tool: str = "",
+        reason: str = "",
+        score: float = 0.0,
+    ) -> None:
+        """Log a non-tool-call event."""
+        self.log(AuditEntry(
+            event_type=event_type,
+            server_id=server,
+            tool_name=tool,
+            reason=reason,
+            score=score,
+        ))
+
+    def flush(self) -> None:
+        """Write buffered entries to disk."""
+        if not self._buffer:
+            return
+
+        try:
+            with open(self._path, "a") as f:
+                for entry in self._buffer:
+                    line = entry.model_dump_json()
+                    f.write(line + "\n")
+            self._buffer.clear()
+        except OSError as e:
+            logger.error("Failed to write audit log: %s", e)
+
+    def get_session_entries(self) -> list[AuditEntry]:
+        """Get all entries for current session (including unflushed)."""
+        return list(self._buffer)
+
+    def close(self) -> None:
+        """Flush remaining buffer and close."""
+        self.flush()
+
+    @staticmethod
+    def hash_params(params: dict[str, Any]) -> str:
+        """Compute SHA-256 hash of params for audit (no raw secrets)."""
+        return hashlib.sha256(
+            json.dumps(params, sort_keys=True, default=str).encode()
+        ).hexdigest()

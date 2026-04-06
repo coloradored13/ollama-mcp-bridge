@@ -1,0 +1,50 @@
+# ollama-mcp-bridge configuration
+# See: https://github.com/coloradored13/ollama-mcp-bridge
+
+[bridge]
+ollama_host = "http://127.0.0.1:11434"
+
+[security]
+require_confirmation_for_destructive = true
+confirmation_timeout_seconds = 60.0
+max_result_bytes = 65536
+rate_limit_per_server = 30
+max_turns = 10
+max_turns_hard_cap = 50
+max_tool_calls_per_session = 100
+
+# Sanitization detectors (all enabled by default)
+# Disable specific detectors by removing them from this list
+enabled_detectors = [
+    "instruction_language",
+    "cross_tool_reference",
+    "exfiltration_pattern",
+    "privilege_escalation",
+    "length_anomaly",
+    "role_impersonation",
+    "encoding_obfuscation",
+]
+sanitization_block_threshold = 70.0
+sanitization_warn_threshold = 40.0
+
+# --- MCP Servers ---
+# Configure each server you want the bridge to connect to.
+# allowed_tools: explicitly list tools the model can use (empty = all)
+# destructive_tools: tools requiring human confirmation before execution
+
+[servers.sigma-mem]
+command = "python"
+args = ["-m", "sigma_mem.mcp_server"]
+allowed_tools = ["store_memory", "recall", "search_memory", "get_meta"]
+destructive_tools = []
+
+# [servers.files]
+# command = "npx"
+# args = ["-y", "@anthropic-ai/mcp-fs"]
+# allowed_tools = ["read_file", "list_directory", "write_file"]
+# destructive_tools = ["write_file"]
+
+[logging]
+audit_file = "~/.ollama-mcp-bridge/audit.jsonl"
+level = "INFO"
+rotation_days = 30

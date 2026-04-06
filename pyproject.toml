@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.backends"
+
+[project]
+name = "ollama-mcp-bridge"
+version = "0.1.0"
+description = "Security-first bridge connecting Ollama models to MCP tool servers"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "ollama~=0.6.1",
+    "mcp~=1.27.0",
+    "pydantic~=2.0",
+    "jsonschema~=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest~=8.0",
+    "pytest-asyncio~=0.24",
+    "ruff~=0.8",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires running Ollama + MCP server",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]

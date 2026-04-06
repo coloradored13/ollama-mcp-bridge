@@ -1,0 +1,355 @@
+"""Shared data types for ollama-mcp-bridge.
+
+This module is the contract surface — all internal modules import types from here.
+Types are organized into four groups:
+
+1. **Transport types**: Raw data from Ollama and MCP servers (untrusted input).
+2. **Security types**: Results of security processing (sanitization, validation, gating).
+3. **Audit types**: Structured logging entries for forensic review.
+4. **Consumer types**: What Bridge.run() returns to the caller.
+
+The separation between ToolSchema (raw, untrusted) and ApprovedTool (scanned, approved)
+is a key security boundary. Code that receives an ApprovedTool can trust that security
+scanning has occurred. Code that receives a ToolSchema must assume it could be malicious.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# --- Transport types ---
+
+
+class ToolSchema(BaseModel):
+    """Raw tool schema as received from an MCP server — UNTRUSTED.
+
+    This represents a tool definition before any security processing. The description,
+    parameter names, enum values, and defaults could all contain malicious instructions
+    (tool poisoning attack — see Invariant Labs disclosure, CyberArk research).
+
+    Frozen (immutable) so the original definition is preserved for hash comparison.
+    The hash is used for rug-pull detection: if a server changes a tool definition
+    after initial approval, the hash won't match and the tool is blocked.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    server: str
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+    @property
+    def raw_definition(self) -> str:
+        """Canonical JSON serialization for hash-based integrity checking.
+
+        Uses sorted keys and compact separators so the same logical definition
+        always produces the same string, regardless of Python dict ordering.
+        Only includes fields that define the tool's behavior — server name is
+        excluded because the same tool on a different server is a different thing.
+        """
+        return json.dumps(
+            {"name": self.name, "description": self.description, "input_schema": self.input_schema},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @property
+    def definition_hash(self) -> str:
+        """SHA-256 hash for rug-pull detection.
+
+        Stored at approval time. Rechecked on every reconnect. If the hash
+        changes, the tool definition was modified after approval — this is
+        the "rug pull" attack where a trusted server swaps a tool's behavior.
+        """
+        return hashlib.sha256(self.raw_definition.encode()).hexdigest()
+
+
+class ActionClass(str, Enum):
+    """Tool action classification — determines which security gate applies.
+
+    READ: auto-approved, no confirmation needed.
+    WRITE: auto-approved by default (configurable to require confirmation).
+    DESTRUCTIVE: requires explicit human confirmation before execution.
+        Timeout on confirmation defaults to denied (fail-closed).
+
+    Classification is set in bridge.toml per-tool via destructive_tools list.
+    Unclassified tools default to WRITE (not READ) as a security precaution.
+    """
+
+    READ = "READ"
+    WRITE = "WRITE"
+    DESTRUCTIVE = "DESTRUCTIVE"
+
+
+class ApprovedTool(BaseModel):
+    """Tool that has passed the full security ingestion pipeline.
+
+    An ApprovedTool has been:
+    1. Checked against the server's allowlist (default-deny)
+    2. Scanned by all 7 sanitization detectors for poisoning
+    3. Verified against its stored hash (rug-pull detection)
+    4. Classified as READ/WRITE/DESTRUCTIVE
+
+    Receiving an ApprovedTool means security scanning HAS occurred.
+    This is the type boundary between "untrusted MCP data" and
+    "validated tool ready for use". Only ApprovedTools are presented
+    to the Ollama model and only ApprovedTools can be executed.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    server: str
+    name: str
+    description: str  # may have been sanitized (suspicious substrings removed)
+    input_schema: dict[str, Any]
+    classification: ActionClass = ActionClass.WRITE
+    definition_hash: str  # stored for ongoing integrity checks
+
+    @property
+    def namespaced_name(self) -> str:
+        """Server-namespaced tool name using __ separator.
+
+        Multiple MCP servers can expose tools with the same name (e.g., both
+        sigma-mem and files could have "search"). Namespacing prevents collisions
+        when presenting tools to the model: "sigma-mem__search" vs "files__search".
+        The __ separator is stripped before calling MCP (MCP uses bare names).
+        """
+        return f"{self.server}__{self.name}"
+
+
+class OllamaToolCall(BaseModel):
+    """Tool call extracted from an Ollama model response — UNTRUSTED.
+
+    Everything in this object was generated by the model. The function_name
+    could be hallucinated (not a real tool). The arguments could contain
+    injection attempts (path traversal, shell metacharacters). Nothing here
+    should be passed to MCP without validation by SecurityGateway.
+    """
+
+    function_name: str  # may be namespaced (server__tool) or bare (model dropped prefix)
+    arguments: dict[str, Any]  # model-generated — validated before MCP call
+
+    @property
+    def server(self) -> str | None:
+        """Extract server name from namespaced function name."""
+        if "__" in self.function_name:
+            return self.function_name.split("__", 1)[0]
+        return None
+
+    @property
+    def tool_name(self) -> str:
+        """Extract tool name, stripping server namespace."""
+        if "__" in self.function_name:
+            return self.function_name.split("__", 1)[1]
+        return self.function_name
+
+
+# --- Security types ---
+
+
+class SanitizationDecision(str, Enum):
+    """Three-tier decision from the tool description sanitization pipeline.
+
+    PASS (score < 40): No suspicious patterns detected. Tool is safe to present to model.
+    WARN (score 40-69): Suspicious patterns found but below blocking threshold.
+        Tool is approved with a warning logged to audit. May be a false positive
+        (e.g., a legitimate tool that mentions URLs in its description).
+    BLOCK (score >= 70): High-confidence malicious content detected. Tool is rejected
+        entirely and never presented to the model. User can override in config.
+
+    Thresholds are configurable in SecurityConfig. The scoring system uses the
+    maximum score across all detectors (not average) — a single high-confidence
+    detection is enough to block, even if other detectors see nothing.
+    """
+
+    PASS = "PASS"
+    WARN = "WARN"
+    BLOCK = "BLOCK"
+
+
+class SanitizationResult(BaseModel):
+    """Result of sanitizing a tool definition."""
+
+    decision: SanitizationDecision
+    score: float = 0.0
+    triggered_rules: list[str] = Field(default_factory=list)
+    sanitized_description: str = ""
+    original_description: str = ""
+
+
+class ValidationResult(BaseModel):
+    """Result of parameter validation (SAD[3])."""
+
+    valid: bool
+    sanitized_params: dict[str, Any] = Field(default_factory=dict)
+    errors: list[str] = Field(default_factory=list)
+
+
+class GateDecision(str, Enum):
+    """Action gate decision (SAD[6])."""
+
+    APPROVED = "APPROVED"
+    NEEDS_CONFIRMATION = "NEEDS_CONFIRMATION"
+    DENIED = "DENIED"
+
+
+class ResultSanitizationTier(str, Enum):
+    """Four-tier classification for tool result sanitization.
+
+    Tool results are the second major injection vector (after tool descriptions).
+    A web search tool might return attacker-controlled HTML. A file read tool might
+    return a file containing "SYSTEM: ignore previous instructions". The model treats
+    tool results as context and may follow embedded instructions.
+
+    CLEAN: No suspicious patterns. Result is prepended with a provenance tag
+        ("[TOOL RESULT -- EXTERNAL DATA]") as a best-effort signal to the model
+        that this content is external and untrusted.
+    ANNOTATED: Minor suspicious content. Warning appended but content preserved.
+    REDACTED: Suspicious patterns (role prefixes, instruction language) stripped.
+        Remaining clean content is passed through with a notice appended.
+    QUARANTINED: Heavy injection attempt (3+ role prefixes or 2+ instruction
+        patterns). Full result is blocked — model sees only a placeholder message.
+        The original unfiltered result is written to the audit log for human review.
+    """
+
+    CLEAN = "CLEAN"
+    ANNOTATED = "ANNOTATED"
+    REDACTED = "REDACTED"
+    QUARANTINED = "QUARANTINED"
+
+
+class ExecutionResult(BaseModel):
+    """Result of SecurityGateway.execute_tool() — the output of the atomic pipeline.
+
+    By the time code receives an ExecutionResult, the full security pipeline has run:
+    permission check, parameter validation, action gating, MCP execution, result
+    sanitization, and audit logging. The content is safe to inject into the model's
+    conversation context (though the provenance tag reminds the model it's external).
+    """
+
+    content: str  # sanitized content — safe to return to model
+    is_error: bool = False
+    sanitization_tier: ResultSanitizationTier = ResultSanitizationTier.CLEAN
+    server: str = ""
+    tool_name: str = ""
+    duration_ms: float = 0.0
+
+
+# --- Audit types ---
+
+
+class AuditEventType(str, Enum):
+    """Types of events recorded in audit log."""
+
+    TOOL_CALL = "tool_call"
+    TOOL_BLOCKED = "tool_blocked"
+    TOOL_CONFIRMED = "tool_confirmed"
+    TOOL_DENIED = "tool_denied"
+    TOOL_ERROR = "tool_error"
+    RATE_LIMITED = "rate_limited"
+    RUG_PULL_DETECTED = "rug_pull_detected"
+    SANITIZATION_WARN = "sanitization_warn"
+    SANITIZATION_BLOCK = "sanitization_block"
+    RESULT_QUARANTINED = "result_quarantined"
+    SESSION_START = "session_start"
+    SESSION_END = "session_end"
+
+
+class AuditEntry(BaseModel):
+    """Single entry in the structured audit log.
+
+    Every tool call, security decision, and lifecycle event is logged here.
+    The audit log enables forensic review of what a model did during a session.
+    This is critical because local models have no built-in safety training —
+    the audit log is the only record of model behavior.
+
+    Security note: params_hash stores a SHA-256 of parameters, NOT the raw params.
+    This prevents secrets (API keys, passwords) that might appear in tool arguments
+    from being written to the audit log in plaintext. params_summary is truncated
+    to 200 chars as a readable hint without full exposure.
+    """
+
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    session_id: str = ""
+    event_type: AuditEventType
+    server_id: str = ""
+    tool_name: str = ""
+    action_class: ActionClass | None = None
+    params_hash: str = ""  # SHA-256 of params — never raw params (may contain secrets)
+    params_summary: str = ""  # first 200 chars — readable hint without full exposure
+    result_size: int = 0
+    result_hash: str = ""
+    decision: str = ""  # ALLOWED, BLOCKED, DENIED, etc.
+    reason: str = ""  # why the decision was made
+    score: float = 0.0  # sanitization score if applicable
+    duration_ms: float = 0.0
+    model_id: str = ""
+    turn: int = 0  # which turn of the multi-turn loop
+
+
+# --- Consumer-facing types ---
+
+
+class ToolCallRecord(BaseModel):
+    """Record of a single tool call for consumer inspection."""
+
+    server: str
+    tool_name: str
+    arguments: dict[str, Any]  # sanitized — no secrets
+    result_summary: str = ""  # first 200 chars of result
+    duration_ms: float = 0.0
+    blocked: bool = False
+    block_reason: str = ""
+
+
+class BridgeResult(BaseModel):
+    """Result of Bridge.run() — returned to consumer."""
+
+    content: str  # final model response text
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    audit_log: list[AuditEntry] = Field(default_factory=list)
+    model: str = ""
+    turns: int = 0
+    truncated: bool = False  # True if max_turns reached
+
+
+class StreamEventType(str, Enum):
+    """Types of streaming events."""
+
+    TEXT = "text"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    CONFIRMATION_NEEDED = "confirmation_needed"
+    ERROR = "error"
+    DONE = "done"
+
+
+class StreamEvent(BaseModel):
+    """Single event in streaming mode."""
+
+    type: StreamEventType
+    content: str | None = None
+    tool: str | None = None
+    server: str | None = None
+    error: str | None = None
+
+
+# --- Server health ---
+
+
+class ServerHealth(BaseModel):
+    """Health status of an MCP server connection."""
+
+    name: str
+    connected: bool = False
+    tools_count: int = 0
+    last_call_ms: float | None = None
+    error: str | None = None
