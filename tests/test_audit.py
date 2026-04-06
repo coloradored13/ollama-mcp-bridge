@@ -7,7 +7,7 @@ import json
 import pytest
 
 from ollama_mcp_bridge.audit import AuditLogger, _summarize_params
-from ollama_mcp_bridge.types import ActionClass
+from ollama_mcp_bridge.types import ActionClass, AuditEventType
 
 
 class TestSummarizeParams:
@@ -177,3 +177,78 @@ class TestAuditSessionRetention:
 
         entries = audit.get_session_entries()
         assert len(entries) == 1
+
+
+class TestAuditEnrichedFields:
+    """PR5 fields (approval_mode, definition_hash, confirmation_outcome) must serialize to disk."""
+
+    def test_enriched_fields_written_to_jsonl(self, tmp_path):
+        """New fields survive the full write path: log_event → buffer → flush → disk."""
+        audit = AuditLogger(
+            audit_file=str(tmp_path / "audit.jsonl"),
+            session_id="test",
+        )
+
+        audit.log_event(
+            AuditEventType.TOOL_FIRST_APPROVED,
+            server="sigma-mem",
+            tool="recall",
+            reason="User approved first-seen tool",
+            approval_mode="first_run_explicit",
+            definition_hash="abc123def456",
+        )
+        audit.log_event(
+            AuditEventType.TOOL_TIMEOUT,
+            server="files",
+            tool="delete",
+            reason="Confirmation timed out",
+            confirmation_outcome="TIMEOUT",
+        )
+        audit.flush()
+
+        lines = (tmp_path / "audit.jsonl").read_text().strip().split("\n")
+        assert len(lines) == 2
+
+        approval = json.loads(lines[0])
+        assert approval["approval_mode"] == "first_run_explicit"
+        assert approval["definition_hash"] == "abc123def456"
+        assert approval["event_type"] == "tool_first_approved"
+
+        timeout = json.loads(lines[1])
+        assert timeout["confirmation_outcome"] == "TIMEOUT"
+        assert timeout["event_type"] == "tool_timeout"
+
+    def test_enriched_fields_default_empty(self, tmp_path):
+        """Unenriched events still serialize — new fields default to empty string."""
+        audit = AuditLogger(
+            audit_file=str(tmp_path / "audit.jsonl"),
+            session_id="test",
+        )
+
+        audit.log_event(AuditEventType.SESSION_START)
+        audit.flush()
+
+        content = (tmp_path / "audit.jsonl").read_text().strip()
+        entry = json.loads(content)
+        assert entry["approval_mode"] == ""
+        assert entry["definition_hash"] == ""
+        assert entry["confirmation_outcome"] == ""
+
+    def test_definition_hash_not_a_secret(self, tmp_path):
+        """definition_hash is a SHA-256 hex digest — safe to write to audit log."""
+        audit = AuditLogger(
+            audit_file=str(tmp_path / "audit.jsonl"),
+            session_id="test",
+        )
+
+        hash_val = "a" * 64  # SHA-256 length
+        audit.log_event(
+            AuditEventType.TOOL_FIRST_APPROVED,
+            server="s",
+            tool="t",
+            definition_hash=hash_val,
+        )
+        audit.flush()
+
+        content = (tmp_path / "audit.jsonl").read_text()
+        assert hash_val in content
