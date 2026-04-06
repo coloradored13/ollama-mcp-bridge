@@ -92,13 +92,14 @@ class SecurityConfig(BaseModel):
     sanitization_block_threshold: float = 70.0
     sanitization_warn_threshold: float = 40.0
 
-    @field_validator("max_turns")
-    @classmethod
-    def max_turns_within_hard_cap(cls, v: int, info: Any) -> int:
-        hard_cap = info.data.get("max_turns_hard_cap", 50)
-        if v > hard_cap:
-            raise ValueError(f"max_turns ({v}) cannot exceed max_turns_hard_cap ({hard_cap})")
-        return v
+    @model_validator(mode="after")
+    def max_turns_within_hard_cap(self) -> "SecurityConfig":
+        if self.max_turns > self.max_turns_hard_cap:
+            raise ValueError(
+                f"max_turns ({self.max_turns}) cannot exceed "
+                f"max_turns_hard_cap ({self.max_turns_hard_cap})"
+            )
+        return self
 
 
 class LoggingConfig(BaseModel):
