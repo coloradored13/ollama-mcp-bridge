@@ -93,6 +93,7 @@ class SecurityConfig(BaseModel):
     sanitization_warn_threshold: float = 40.0
     require_first_run_approval: bool = True
     auto_approve_first_seen: bool = False
+    approval_registry_path: str = "~/.ollama-mcp-bridge/approved_tools.json"
 
     @model_validator(mode="after")
     def max_turns_within_hard_cap(self) -> "SecurityConfig":

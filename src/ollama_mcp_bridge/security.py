@@ -1271,7 +1271,7 @@ class SecurityGateway:
         self._validator = ParameterValidator()
         self._result_sanitizer = ResultSanitizer(config.security.max_result_bytes)
         self._risk_assessor = SemanticRiskAssessor()
-        self._registry = registry or ToolApprovalRegistry()
+        self._registry = registry or ToolApprovalRegistry(config.security.approval_registry_path)
         self._rate_limiter = RateLimiter(config.security)
         self._gate = ActionGate(
             require_confirmation=config.security.require_confirmation_for_destructive,
