@@ -72,6 +72,43 @@ class ToolSchema(BaseModel):
         return hashlib.sha256(self.raw_definition.encode()).hexdigest()
 
 
+class SourceType(str, Enum):
+    """Origin of content flowing through the bridge.
+
+    Determines baseline trust assumptions. Content from different sources
+    carries different risk profiles — a tool_result from a web scraper is
+    fundamentally different from a user message, even though both arrive
+    as strings. The SinkPolicyEngine (PR 7) uses source type to decide
+    what untrusted content is allowed to influence.
+    """
+
+    USER = "user"
+    SYSTEM = "system"
+    DEVELOPER_POLICY = "developer_policy"
+    TOOL_RESULT = "tool_result"
+    DOCUMENT = "document"
+    WEBPAGE = "webpage"
+    EMAIL = "email"
+    MEMORY = "memory"
+    UNKNOWN = "unknown"
+
+
+class TrustLevel(str, Enum):
+    """Trust classification of content origin.
+
+    TRUSTED: System-generated or developer-policy content. Can issue instructions.
+    USER_CONTROLLED: Direct user input. Trusted for intent but may contain errors.
+    THIRD_PARTY: Content from external tools, documents, web. Must not be treated
+        as instructions — this is the core "separate data from instructions" principle.
+    UNKNOWN: Origin cannot be determined. Treated as third_party for security.
+    """
+
+    TRUSTED = "trusted"
+    USER_CONTROLLED = "user_controlled"
+    THIRD_PARTY = "third_party"
+    UNKNOWN = "unknown"
+
+
 class ActionClass(str, Enum):
     """Tool action classification — determines which security gate applies.
 
@@ -265,6 +302,54 @@ class ConfirmationOutcome(str, Enum):
     NO_CALLBACK = "NO_CALLBACK"
 
 
+class ContentProvenance(BaseModel):
+    """Metadata tracking where content originated and its trust implications.
+
+    Attached to every non-system content object flowing through the bridge.
+    Enables the security pipeline to make source-aware decisions: a URL in a
+    tool result from a web search tool (third_party) is treated differently
+    than a URL the user typed directly (user_controlled).
+
+    The can_issue_instructions field is the key security property: only TRUSTED
+    sources should have this set to True. Third-party content with instructions
+    is the definition of prompt injection.
+    """
+
+    source_type: SourceType = SourceType.UNKNOWN
+    trust_level: TrustLevel = TrustLevel.UNKNOWN
+    origin_id: str = ""
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    can_issue_instructions: bool = False
+    can_contain_sensitive_data: bool = False
+
+
+class SemanticRiskAssessment(BaseModel):
+    """Structured risk assessment of a content item.
+
+    Produced by SemanticRiskAssessor — replaces the binary pass/block decision
+    with a structured output that downstream components (SinkPolicyEngine in PR 7)
+    can reason about. Each boolean flag maps to a specific attack pattern.
+
+    The overall_risk_score is 0.0-1.0 (normalized from detector scores).
+    Individual flags indicate which specific attack patterns were detected.
+    The explanation field provides human-readable reasoning.
+    raw_signals lists the specific detector matches for forensic review.
+    """
+
+    overall_risk_score: float = 0.0
+    attempts_instruction_override: bool = False
+    attempts_tool_routing: bool = False
+    attempts_permission_escalation: bool = False
+    attempts_exfiltration: bool = False
+    requests_sensitive_data: bool = False
+    proposes_external_destination: bool = False
+    contains_social_pressure: bool = False
+    contains_urgency_manipulation: bool = False
+    contains_hidden_or_obfuscated_instructions: bool = False
+    explanation: str = ""
+    raw_signals: list[str] = Field(default_factory=list)
+
+
 class GateDecision(str, Enum):
     """Action gate decision (SAD[6])."""
 
@@ -303,8 +388,13 @@ class ExecutionResult(BaseModel):
 
     By the time code receives an ExecutionResult, the full security pipeline has run:
     permission check, parameter validation, action gating, MCP execution, result
-    sanitization, and audit logging. The content is safe to inject into the model's
-    conversation context (though the provenance tag reminds the model it's external).
+    sanitization, semantic risk assessment, and audit logging. The content is safe
+    to inject into the model's conversation context (though the provenance tag
+    reminds the model it's external).
+
+    The provenance and risk_assessment fields enable downstream components
+    (SinkPolicyEngine in PR 7) to make source-aware decisions about what the
+    model can do with this content.
     """
 
     content: str  # sanitized content — safe to return to model
@@ -313,6 +403,8 @@ class ExecutionResult(BaseModel):
     server: str = ""
     tool_name: str = ""
     duration_ms: float = 0.0
+    provenance: ContentProvenance | None = None
+    risk_assessment: SemanticRiskAssessment | None = None
 
 
 class PendingToolApproval(BaseModel):
