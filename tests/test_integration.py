@@ -967,6 +967,15 @@ class TestApproveToolAPI:
         tool = _make_tool_schema("echo")
         assert registry.was_denied(tool)
 
+        # Audit entry carries definition_hash for forensics
+        entries = gateway._audit.get_session_entries()
+        revoke_events = [
+            e for e in entries
+            if e.event_type == AuditEventType.TOOL_DENIED and e.tool_name == "echo"
+        ]
+        assert len(revoke_events) == 1
+        assert revoke_events[0].definition_hash == tool.definition_hash
+
     @pytest.mark.asyncio
     async def test_revoked_tool_not_callable(self, tmp_path):
         """After deny_tool() on approved tool, execute_tool() raises."""

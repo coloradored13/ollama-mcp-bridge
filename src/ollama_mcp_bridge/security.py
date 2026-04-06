@@ -1196,7 +1196,12 @@ class SecurityGateway:
             san_result = self._sanitizer.sanitize(original_tool)
             approved_tool = self._make_approved_tool(server, original_tool, san_result)
             self._approved_tools[approved_tool.namespaced_name] = approved_tool
-            self._tools_by_server.setdefault(server, []).append(approved_tool)
+            # Dedup guard: remove stale entry before appending (defensive)
+            server_tools = self._tools_by_server.setdefault(server, [])
+            self._tools_by_server[server] = [
+                t for t in server_tools if t.name != tool_name
+            ]
+            self._tools_by_server[server].append(approved_tool)
 
             self._audit.log_event(
                 AuditEventType.TOOL_FIRST_APPROVED,
@@ -1278,11 +1283,21 @@ class SecurityGateway:
 
             self._tool_states[tool_key] = ToolState.DENIED_BY_USER
 
+            # Get hash for audit from the discovered tool or the approved tool
+            revoked_hash = ""
+            discovered = self._discovered_tools.get(server, [])
+            original = next((t for t in discovered if t.name == tool_name), None)
+            if original is not None:
+                revoked_hash = original.definition_hash
+            elif approved_tool is not None:
+                revoked_hash = approved_tool.definition_hash
+
             self._audit.log_event(
                 AuditEventType.TOOL_DENIED,
                 server=server,
                 tool=tool_name,
                 reason="Revoked via deny_tool() API",
+                definition_hash=revoked_hash,
             )
             logger.info("Revoked tool '%s' on '%s' via API", tool_name, server)
 
@@ -1621,6 +1636,7 @@ class SecurityGateway:
                     server=approved.server,
                     tool=approved.name,
                     confirmation_outcome=outcome.value,
+                    definition_hash=approved.definition_hash,
                 )
             elif outcome == ConfirmationOutcome.TIMEOUT:
                 self._audit.log_event(
