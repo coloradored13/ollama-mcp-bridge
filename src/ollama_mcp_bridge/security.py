@@ -79,6 +79,7 @@ from .types import (
     ApprovedTool,
     AuditEventType,
     ConfirmationOutcome,
+    ContentProvenance,
     ExecutionResult,
     GateDecision,
     OllamaToolCall,
@@ -88,8 +89,11 @@ from .types import (
     SanitizationDecision,
     SanitizationResult,
     ScanResult,
+    SemanticRiskAssessment,
+    SourceType,
     ToolSchema,
     ToolState,
+    TrustLevel,
     ValidationResult,
 )
 
@@ -633,6 +637,22 @@ class ResultSanitizer:
 
     def __init__(self, max_result_bytes: int = 65536):
         self._max_bytes = max_result_bytes
+        self._assessor = SemanticRiskAssessor()
+
+    def sanitize_and_assess(
+        self,
+        content: str,
+        provenance: ContentProvenance | None = None,
+    ) -> tuple[str, ResultSanitizationTier, SemanticRiskAssessment]:
+        """Sanitize tool result and produce structured risk assessment.
+
+        Returns (sanitized_content, tier, risk_assessment).
+        The risk assessment provides structured data for downstream policy
+        decisions (SinkPolicyEngine in PR 7).
+        """
+        sanitized, tier = self.sanitize(content)
+        assessment = self._assessor.assess(content, provenance)
+        return sanitized, tier, assessment
 
     def sanitize(self, content: str) -> tuple[str, ResultSanitizationTier]:
         """Sanitize tool result content.
@@ -670,6 +690,170 @@ class ResultSanitizer:
         # Provenance tag (best-effort annotation, not security control per DA[#9])
         tagged = f"[TOOL RESULT — EXTERNAL DATA]\n{content}"
         return tagged, ResultSanitizationTier.CLEAN
+
+
+# --- Semantic Risk Assessment ---
+
+
+class SemanticRiskAssessor:
+    """Produces structured risk assessments from content analysis.
+
+    Maps existing detector patterns to the structured SemanticRiskAssessment model.
+    Each detector's matches are mapped to specific attack-pattern flags, giving
+    downstream components (SinkPolicyEngine in PR 7) structured data to reason
+    about — not just a pass/block binary.
+
+    The assessor runs all detectors that are relevant to content analysis (not just
+    tool descriptions). The overall_risk_score is the max detector score normalized
+    to 0.0-1.0. Individual flags are set based on which detectors triggered.
+
+    Future: pluggable backend (e.g., LLM-based semantic assessment).
+    """
+
+    # Social pressure patterns — not covered by existing detectors
+    SOCIAL_PRESSURE_PATTERNS = re.compile(
+        r"\b(everyone knows|obviously|clearly you should|trust me|"
+        r"don't overthink|just do it|no need to verify)\b",
+        re.IGNORECASE,
+    )
+
+    # Urgency manipulation patterns
+    URGENCY_PATTERNS = re.compile(
+        r"\b(urgent|immediately|right now|asap|time.sensitive|"
+        r"before it's too late|act fast|hurry|deadline)\b",
+        re.IGNORECASE,
+    )
+
+    # Sensitive data request patterns
+    SENSITIVE_DATA_PATTERNS = re.compile(
+        r"\b(password|api.key|secret|token|credential|private.key|"
+        r"ssh.key|access.key|auth|bearer)\b",
+        re.IGNORECASE,
+    )
+
+    def __init__(self) -> None:
+        self._instruction_detector = InstructionLanguageDetector()
+        self._cross_tool_detector = CrossToolReferenceDetector()
+        self._exfiltration_detector = ExfiltrationPatternDetector()
+        self._escalation_detector = PrivilegeEscalationDetector()
+        self._role_detector = RoleImpersonationDetector()
+        self._encoding_detector = EncodingObfuscationDetector()
+
+    def assess(
+        self, content: str, provenance: ContentProvenance | None = None,
+    ) -> SemanticRiskAssessment:
+        """Assess content for semantic manipulation risks.
+
+        Returns a structured assessment with individual attack-pattern flags
+        and an overall risk score (0.0-1.0).
+        """
+        signals: list[str] = []
+        max_score = 0.0
+
+        # Run existing detectors and map to flags
+        instruction_score = self._instruction_detector.scan(content)
+        cross_tool_score = self._cross_tool_detector.scan(content)
+        exfiltration_score = self._exfiltration_detector.scan(content)
+        escalation_score = self._escalation_detector.scan(content)
+        role_score = self._role_detector.scan(content)
+        encoding_score = self._encoding_detector.scan(content)
+
+        attempts_instruction_override = False
+        if instruction_score > 0 or role_score > 0:
+            attempts_instruction_override = True
+            if instruction_score > 0:
+                signals.append(f"instruction_language:{instruction_score:.0f}")
+            if role_score > 0:
+                signals.append(f"role_impersonation:{role_score:.0f}")
+            max_score = max(max_score, instruction_score, role_score)
+
+        attempts_tool_routing = False
+        if cross_tool_score > 0:
+            attempts_tool_routing = True
+            signals.append(f"cross_tool_reference:{cross_tool_score:.0f}")
+            max_score = max(max_score, cross_tool_score)
+
+        attempts_permission_escalation = False
+        if escalation_score > 0:
+            attempts_permission_escalation = True
+            signals.append(f"privilege_escalation:{escalation_score:.0f}")
+            max_score = max(max_score, escalation_score)
+
+        attempts_exfiltration = False
+        proposes_external_destination = False
+        if exfiltration_score > 0:
+            attempts_exfiltration = True
+            proposes_external_destination = True
+            signals.append(f"exfiltration_pattern:{exfiltration_score:.0f}")
+            max_score = max(max_score, exfiltration_score)
+
+        contains_hidden_or_obfuscated_instructions = False
+        if encoding_score > 0:
+            contains_hidden_or_obfuscated_instructions = True
+            signals.append(f"encoding_obfuscation:{encoding_score:.0f}")
+            max_score = max(max_score, encoding_score)
+
+        # Additional patterns not covered by existing detectors
+        contains_social_pressure = bool(self.SOCIAL_PRESSURE_PATTERNS.search(content))
+        if contains_social_pressure:
+            signals.append("social_pressure")
+            max_score = max(max_score, 30.0)
+
+        contains_urgency_manipulation = bool(self.URGENCY_PATTERNS.search(content))
+        if contains_urgency_manipulation:
+            signals.append("urgency_manipulation")
+            max_score = max(max_score, 30.0)
+
+        requests_sensitive_data = bool(self.SENSITIVE_DATA_PATTERNS.search(content))
+        if requests_sensitive_data:
+            signals.append("sensitive_data_request")
+            max_score = max(max_score, 40.0)
+
+        # Provenance amplification: third-party content with instruction patterns
+        # is higher risk than user content with the same patterns
+        if provenance and provenance.trust_level == TrustLevel.THIRD_PARTY:
+            if attempts_instruction_override:
+                max_score = min(max_score * 1.25, 100.0)
+                signals.append("provenance_amplified:third_party+instructions")
+
+        # Normalize to 0.0-1.0
+        overall_risk_score = min(max_score / 100.0, 1.0)
+
+        # Build explanation
+        explanation = self._build_explanation(signals, overall_risk_score, provenance)
+
+        return SemanticRiskAssessment(
+            overall_risk_score=overall_risk_score,
+            attempts_instruction_override=attempts_instruction_override,
+            attempts_tool_routing=attempts_tool_routing,
+            attempts_permission_escalation=attempts_permission_escalation,
+            attempts_exfiltration=attempts_exfiltration,
+            requests_sensitive_data=requests_sensitive_data,
+            proposes_external_destination=proposes_external_destination,
+            contains_social_pressure=contains_social_pressure,
+            contains_urgency_manipulation=contains_urgency_manipulation,
+            contains_hidden_or_obfuscated_instructions=contains_hidden_or_obfuscated_instructions,
+            explanation=explanation,
+            raw_signals=signals,
+        )
+
+    def _build_explanation(
+        self,
+        signals: list[str],
+        risk_score: float,
+        provenance: ContentProvenance | None,
+    ) -> str:
+        if not signals:
+            return "No semantic risks detected."
+
+        parts = [f"Risk score: {risk_score:.2f}."]
+        parts.append(f"Signals: {', '.join(signals)}.")
+        if provenance:
+            parts.append(
+                f"Source: {provenance.source_type.value} "
+                f"(trust: {provenance.trust_level.value})."
+            )
+        return " ".join(parts)
 
 
 # --- Tool Approval Registry (SAD[7]) ---
@@ -1086,6 +1270,7 @@ class SecurityGateway:
         self._sanitizer = ToolSanitizer(config.security)
         self._validator = ParameterValidator()
         self._result_sanitizer = ResultSanitizer(config.security.max_result_bytes)
+        self._risk_assessor = SemanticRiskAssessor()
         self._registry = registry or ToolApprovalRegistry()
         self._rate_limiter = RateLimiter(config.security)
         self._gate = ActionGate(
@@ -1374,8 +1559,21 @@ class SecurityGateway:
 
                 self._tool_states[tool_key] = ToolState.ALLOWLISTED
 
-                # Sanitize tool definition (SR-1)
+                # Sanitize tool definition (SR-1) and assess semantic risk
                 san_result = self._sanitizer.sanitize(tool)
+                tool_provenance = ContentProvenance(
+                    source_type=SourceType.SYSTEM,
+                    trust_level=TrustLevel.THIRD_PARTY,
+                    origin_id=f"{server_name}:{tool.name}",
+                    can_issue_instructions=False,
+                )
+                tool_risk = self._risk_assessor.assess(tool.description, tool_provenance)
+                if tool_risk.overall_risk_score > 0.0:
+                    logger.debug(
+                        "Semantic risk for tool '%s' on '%s': score=%.2f signals=%s",
+                        tool.name, server_name, tool_risk.overall_risk_score,
+                        tool_risk.raw_signals,
+                    )
 
                 if san_result.decision == SanitizationDecision.BLOCK:
                     self._tool_states[tool_key] = ToolState.BLOCKED_SANITIZATION
@@ -1696,8 +1894,17 @@ class SecurityGateway:
                 safe_message=str(e)[:200],
             ) from e
 
-        # 6. Sanitize result (SR-6)
-        sanitized_content, tier = self._result_sanitizer.sanitize(raw_result)
+        # 6. Sanitize result and assess semantic risk (SR-6)
+        provenance = ContentProvenance(
+            source_type=SourceType.TOOL_RESULT,
+            trust_level=TrustLevel.THIRD_PARTY,
+            origin_id=f"{approved.server}:{approved.name}",
+            can_issue_instructions=False,
+            can_contain_sensitive_data=True,
+        )
+        sanitized_content, tier, risk_assessment = (
+            self._result_sanitizer.sanitize_and_assess(raw_result, provenance)
+        )
 
         if tier == ResultSanitizationTier.QUARANTINED:
             self._audit.log_event(
@@ -1731,6 +1938,8 @@ class SecurityGateway:
             server=approved.server,
             tool_name=approved.name,
             duration_ms=duration_ms,
+            provenance=provenance,
+            risk_assessment=risk_assessment,
         )
 
     async def disconnect_all(self) -> None:
