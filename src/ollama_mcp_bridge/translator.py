@@ -146,9 +146,16 @@ class ToolTranslator:
 
     @staticmethod
     def to_tool_result_message(tool_name: str, content: str) -> dict[str, Any]:
-        """Format a tool result as an Ollama message for the conversation."""
+        """Format a tool result as an Ollama message for the conversation.
+
+        Args:
+            tool_name: The namespaced tool name (e.g., "server__tool") matching
+                what was sent to Ollama in the assistant message's tool_calls.
+            content: The tool execution result or error message.
+        """
         return {
             "role": "tool",
+            "name": tool_name,
             "content": content,
         }
 

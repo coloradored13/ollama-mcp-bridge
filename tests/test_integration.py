@@ -636,6 +636,54 @@ class TestAgentLoopIntegration:
             )
 
     @pytest.mark.asyncio
+    async def test_tool_result_message_includes_name(self, loop_setup):
+        """Tool result messages sent to Ollama must include the tool name.
+
+        Ollama uses the name field to correlate tool results back to the
+        tool_calls in the preceding assistant message. Without it, multi-turn
+        tool use can silently produce wrong conversation structure.
+        """
+        loop, ollama, security = loop_setup
+
+        turn1 = _mock_ollama_response(
+            content="Looking it up.",
+            tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}],
+        )
+        turn2 = _mock_ollama_response(content="Found it.")
+
+        ollama.chat = AsyncMock(side_effect=[turn1, turn2])
+        security.execute_tool = AsyncMock(return_value=ExecutionResult(
+            content="[TOOL RESULT — EXTERNAL DATA]\nData here",
+            server="test-server",
+            tool_name="recall",
+            duration_ms=5.0,
+        ))
+
+        await loop.execute("Search", model="test-model")
+
+        # Get messages from the second Ollama call
+        second_call = ollama.chat.call_args_list[1]
+        messages = second_call.kwargs.get("messages", [])
+
+        # Find assistant and tool messages
+        assistant_msgs = [m for m in messages if m["role"] == "assistant"]
+        tool_msgs = [m for m in messages if m["role"] == "tool"]
+
+        # Assistant message must have tool_calls
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["tool_calls"] is not None
+        assert assistant_msgs[0]["tool_calls"][0]["function"]["name"] == "test-server__recall"
+
+        # Tool result must have matching name
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0]["name"] == "test-server__recall"
+        assert "Data here" in tool_msgs[0]["content"]
+
+        # Order: assistant before tool
+        msg_roles = [m["role"] for m in messages]
+        assert msg_roles.index("assistant") < msg_roles.index("tool")
+
+    @pytest.mark.asyncio
     async def test_parameter_rejection_includes_schema_hint(self, loop_setup):
         """ADR[8]: Retry-with-correction — schema hint included in error message.
 

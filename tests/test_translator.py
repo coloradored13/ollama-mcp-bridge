@@ -116,8 +116,9 @@ class TestToolTranslator:
         assert translator.parse_tool_call(tc, multiple_tools) is None
 
     def test_to_tool_result_message(self):
-        msg = ToolTranslator.to_tool_result_message("tool", "result text")
+        msg = ToolTranslator.to_tool_result_message("sigma-mem__recall", "result text")
         assert msg["role"] == "tool"
+        assert msg["name"] == "sigma-mem__recall"
         assert msg["content"] == "result text"
 
     def test_to_ollama_messages_with_system(self):
