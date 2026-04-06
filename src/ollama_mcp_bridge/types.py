@@ -284,7 +284,7 @@ class AuditEntry(BaseModel):
     tool_name: str = ""
     action_class: ActionClass | None = None
     params_hash: str = ""  # SHA-256 of params — never raw params (may contain secrets)
-    params_summary: str = ""  # first 200 chars — readable hint without full exposure
+    params_summary: str = ""  # structural summary (field names, types, lengths) — no raw values
     result_size: int = 0
     result_hash: str = ""
     decision: str = ""  # ALLOWED, BLOCKED, DENIED, etc.
