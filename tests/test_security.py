@@ -658,6 +658,18 @@ class TestToolApprovalRegistry:
         other = ToolSchema(server="s", name="t", description="other", input_schema={"type": "object"})
         assert registry.check_integrity(other)
 
+    def test_deny_only_entry_not_known(self, tmp_path):
+        """A deny-only entry is NOT considered 'known' — prevents auto-approve bypass."""
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        tool = ToolSchema(server="s", name="t", description="d", input_schema={"type": "object"})
+
+        registry.deny(tool)
+        # Entry exists but has no approved_hash — is_known must return False
+        assert not registry.is_known("s", "t")
+        # After approving, now it's known
+        registry.approve(tool, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
+        assert registry.is_known("s", "t")
+
     def test_get_entry_returns_none_for_unknown(self, tmp_path):
         registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
         assert registry.get_entry("no", "such") is None

@@ -736,6 +736,44 @@ class TestRegistryApprovalModes:
             assert entry.approved_hash == ""
             assert tool.definition_hash in entry.denied_hashes
 
+    @pytest.mark.asyncio
+    async def test_denied_tool_not_auto_approved_on_rescan(self, tmp_path):
+        """Previously denied tool must go back to PENDING on next scan, not auto-approve.
+
+        Regression test: deny() creates a registry entry. If is_known() treats
+        deny-only entries as 'known', the 'returning user' fast path would
+        silently auto-approve a tool the user explicitly rejected.
+        """
+        registry_path = str(tmp_path / "approved.json")
+
+        # First scan: user denies all tools
+        gateway1, _ = _make_fresh_gateway(tmp_path)
+
+        async def deny_all(pending):
+            return {p.key: False for p in pending}
+
+        gateway1.set_approval_callback(deny_all)
+        await gateway1.connect_and_scan()
+
+        # Verify denial recorded
+        registry = gateway1._registry
+        assert registry.was_denied(_make_tool_schema("echo"))
+
+        # Second scan: same registry, same tools reappear — must go PENDING, not APPROVED
+        gateway2, _ = _make_fresh_gateway(
+            tmp_path,
+            registry=ToolApprovalRegistry(registry_path),
+        )
+        scan = await gateway2.connect_and_scan()
+
+        # Tools must NOT be auto-approved
+        assert scan.total_approved == 0
+        # They should be pending (require_first_run_approval=True by default)
+        assert scan.has_pending
+        states = gateway2.get_tool_states()
+        for name in ["echo", "add", "delete_file"]:
+            assert states[f"test-server:{name}"] == ToolState.PENDING_FIRST_APPROVAL
+
 
 # --- DA GAP-2: AgentLoop multi-turn flow ---
 

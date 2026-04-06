@@ -752,8 +752,16 @@ class ToolApprovalRegistry:
         return entry.approved_hash == tool.definition_hash
 
     def is_known(self, server: str, tool: str) -> bool:
-        """Check if a tool has ever been approved."""
-        return self._key(server, tool) in self._entries
+        """Check if a tool has been approved (has a non-empty approved_hash).
+
+        Deny-only entries (approved_hash='') do NOT count as known.
+        This prevents a previously-denied tool from being auto-approved
+        on the next scan via the 'known tool, hash matches' fast path.
+        """
+        entry = self._entries.get(self._key(server, tool))
+        if entry is None:
+            return False
+        return bool(entry.approved_hash)
 
     def approve(
         self,
