@@ -72,7 +72,8 @@ class AuditLogger:
     ):
         self._path = Path(audit_file).expanduser()
         self._session_id = session_id
-        self._buffer: list[AuditEntry] = []
+        self._buffer: list[AuditEntry] = []  # pending disk writes
+        self._session_entries: list[AuditEntry] = []  # full session record
         self._buffer_limit = 10
         self._ensure_directory()
 
@@ -81,10 +82,11 @@ class AuditLogger:
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def log(self, entry: AuditEntry) -> None:
-        """Add an audit entry to the buffer."""
+        """Add an audit entry to the buffer and session record."""
         if not entry.session_id:
             entry.session_id = self._session_id
         self._buffer.append(entry)
+        self._session_entries.append(entry)
         if len(self._buffer) >= self._buffer_limit:
             self.flush()
 
@@ -162,8 +164,8 @@ class AuditLogger:
             logger.error("Failed to write audit log: %s", e)
 
     def get_session_entries(self) -> list[AuditEntry]:
-        """Get all entries for current session (including unflushed)."""
-        return list(self._buffer)
+        """Get all entries for current session regardless of flush state."""
+        return list(self._session_entries)
 
     def close(self) -> None:
         """Flush remaining buffer and close."""
