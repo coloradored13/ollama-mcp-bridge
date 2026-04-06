@@ -683,7 +683,8 @@ class TestRegistryApprovalModes:
 
     @pytest.mark.asyncio
     async def test_callback_denial_records_denied_hash(self, tmp_path):
-        """User denying via callback → hash stored in denied_hashes."""
+        """User denying via callback → correct hash in denied_hashes, persists across reload."""
+        registry_path = str(tmp_path / "approved.json")
         gateway, _ = _make_fresh_gateway(tmp_path)
 
         async def deny_all(pending):
@@ -696,6 +697,44 @@ class TestRegistryApprovalModes:
         for name in ["echo", "add", "delete_file"]:
             tool = _make_tool_schema(name)
             assert registry.was_denied(tool), f"{name} should be recorded as denied"
+
+            # Verify the entry structure — denied_hashes contains the exact hash
+            entry = registry.get_entry("test-server", name)
+            assert entry is not None, f"No entry for {name}"
+            assert tool.definition_hash in entry.denied_hashes
+            assert entry.approved_hash == ""  # never approved, only denied
+
+        # Denied state survives reload from disk
+        registry2 = ToolApprovalRegistry(registry_path)
+        for name in ["echo", "add", "delete_file"]:
+            tool = _make_tool_schema(name)
+            assert registry2.was_denied(tool), f"{name} denial should persist across reload"
+
+    @pytest.mark.asyncio
+    async def test_mixed_approval_denial_registry_state(self, tmp_path):
+        """Approve some, deny others → registry has correct entries for each."""
+        gateway, _ = _make_fresh_gateway(tmp_path)
+
+        async def approve_echo_only(pending):
+            return {p.key: (p.name == "echo") for p in pending}
+
+        gateway.set_approval_callback(approve_echo_only)
+        await gateway.connect_and_scan()
+
+        registry = gateway._registry
+
+        # echo: approved with FIRST_RUN_EXPLICIT, no denied hashes
+        echo_entry = registry.get_entry("test-server", "echo")
+        assert echo_entry.approval_mode == ApprovalMode.FIRST_RUN_EXPLICIT
+        assert echo_entry.approved_hash == _make_tool_schema("echo").definition_hash
+        assert echo_entry.denied_hashes == []
+
+        # add, delete_file: denied, hash recorded
+        for name in ["add", "delete_file"]:
+            tool = _make_tool_schema(name)
+            entry = registry.get_entry("test-server", name)
+            assert entry.approved_hash == ""
+            assert tool.definition_hash in entry.denied_hashes
 
 
 # --- DA GAP-2: AgentLoop multi-turn flow ---
