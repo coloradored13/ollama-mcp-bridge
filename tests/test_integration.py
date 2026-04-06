@@ -23,6 +23,7 @@ from ollama_mcp_bridge.audit import AuditLogger
 from ollama_mcp_bridge.config import BridgeConfig, SecurityConfig, ServerConfig
 from ollama_mcp_bridge.errors import (
     ConfirmationDeniedError,
+    LoopError,
     ParameterRejectedError,
     ToolBlockedError,
 )
@@ -38,6 +39,8 @@ from ollama_mcp_bridge.types import (
     ExecutionResult,
     OllamaToolCall,
     ResultSanitizationTier,
+    StreamEvent,
+    StreamEventType,
     ToolSchema,
 )
 
@@ -715,3 +718,136 @@ class TestAgentLoopIntegration:
         assert len(tool_result_msgs) > 0
         # Should contain "Expected format" with schema info
         assert any("Expected format" in m.get("content", "") for m in tool_result_msgs)
+
+
+# --- PR 2: Streaming tests ---
+
+
+class TestExecuteStreamLive:
+    """Verify execute_stream yields events incrementally, not as post-hoc replay."""
+
+    @pytest.fixture
+    def loop_setup(self):
+        """Set up an AgentLoop with mocked Ollama and SecurityGateway."""
+        ollama = MagicMock(spec=OllamaClient)
+        security = MagicMock(spec=SecurityGateway)
+        translator = ToolTranslator()
+
+        security.get_approved_tools.return_value = [
+            ApprovedTool(
+                server="test-server",
+                name="recall",
+                description="Recall memories",
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+                classification=ActionClass.READ,
+                definition_hash="hash1",
+            ),
+        ]
+
+        loop = AgentLoop(
+            ollama=ollama,
+            security=security,
+            translator=translator,
+            max_turns=5,
+        )
+
+        return loop, ollama, security
+
+    @pytest.mark.asyncio
+    async def test_tool_call_before_done(self, loop_setup):
+        """tool_call event must arrive before the final done event."""
+        loop, ollama, security = loop_setup
+
+        turn1 = _mock_ollama_response(
+            tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}],
+        )
+        turn2 = _mock_ollama_response(content="Found it.")
+
+        ollama.chat = AsyncMock(side_effect=[turn1, turn2])
+        security.execute_tool = AsyncMock(return_value=ExecutionResult(
+            content="[TOOL RESULT — EXTERNAL DATA]\nData",
+            server="test-server",
+            tool_name="recall",
+            duration_ms=5.0,
+        ))
+
+        events = []
+        async for event in loop.execute_stream("Search", model="test-model"):
+            events.append(event)
+
+        types = [e.type for e in events]
+        assert StreamEventType.TOOL_CALL in types
+        assert StreamEventType.DONE in types
+        assert types.index(StreamEventType.TOOL_CALL) < types.index(StreamEventType.DONE)
+
+    @pytest.mark.asyncio
+    async def test_slow_tool_produces_incremental_events(self, loop_setup):
+        """Events arrive as they happen, not all at once after execute() finishes."""
+        loop, ollama, security = loop_setup
+
+        turn1 = _mock_ollama_response(
+            tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}],
+        )
+        turn2 = _mock_ollama_response(content="Done.")
+
+        ollama.chat = AsyncMock(side_effect=[turn1, turn2])
+
+        # Simulate a slow tool call
+        async def slow_execute(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            return ExecutionResult(
+                content="[TOOL RESULT — EXTERNAL DATA]\nSlow result",
+                server="test-server",
+                tool_name="recall",
+                duration_ms=50.0,
+            )
+
+        security.execute_tool = AsyncMock(side_effect=slow_execute)
+
+        received_before_done = []
+        async for event in loop.execute_stream("Search", model="test-model"):
+            if event.type == StreamEventType.DONE:
+                break
+            received_before_done.append(event)
+
+        # We should have received tool_call and tool_result before done
+        types = [e.type for e in received_before_done]
+        assert StreamEventType.TOOL_CALL in types
+        assert StreamEventType.TOOL_RESULT in types
+
+    @pytest.mark.asyncio
+    async def test_streaming_error_propagation(self, loop_setup):
+        """Exceptions from execute() propagate after yielding the error event."""
+        loop, ollama, security = loop_setup
+
+        ollama.chat = AsyncMock(side_effect=LoopError("Ollama crashed"))
+
+        events = []
+        with pytest.raises(LoopError, match="Ollama crashed"):
+            async for event in loop.execute_stream("Fail", model="test-model"):
+                events.append(event)
+
+        # Error event should have been yielded before the exception
+        assert any(e.type == StreamEventType.ERROR for e in events)
+
+    @pytest.mark.asyncio
+    async def test_no_tools_stream(self, loop_setup):
+        """Simple text response still yields text + done via streaming."""
+        loop, ollama, security = loop_setup
+
+        ollama.chat = AsyncMock(return_value=_mock_ollama_response(
+            content="Just text."
+        ))
+
+        events = []
+        async for event in loop.execute_stream("Hello", model="test-model"):
+            events.append(event)
+
+        types = [e.type for e in events]
+        assert StreamEventType.TEXT in types
+        assert StreamEventType.DONE in types
+        assert events[-1].type == StreamEventType.DONE
+        assert events[-1].content == "Just text."
