@@ -361,26 +361,55 @@ class AgentLoop:
         model: str,
         system_prompt: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Execute with streaming events.
+        """Execute with live streaming events.
 
-        Yields StreamEvent objects for each stage of the loop.
+        Yields StreamEvent objects as they happen during the loop, not after.
+        A background task runs execute() and pushes events into an asyncio.Queue.
+        The caller receives events incrementally as tools are called and results
+        arrive. A DONE event is always emitted last (on success or failure).
         """
-        events: list[StreamEvent] = []
+        queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
+        worker_error: list[BaseException] = []
 
-        async def collect_event(event: StreamEvent) -> None:
-            events.append(event)
+        async def push_event(event: StreamEvent) -> None:
+            await queue.put(event)
 
-        result = await self.execute(
-            prompt=prompt,
-            model=model,
-            system_prompt=system_prompt,
-            on_event=collect_event,
-        )
+        async def run_worker() -> None:
+            try:
+                result = await self.execute(
+                    prompt=prompt,
+                    model=model,
+                    system_prompt=system_prompt,
+                    on_event=push_event,
+                )
+                await queue.put(StreamEvent(
+                    type=StreamEventType.DONE,
+                    content=result.content,
+                ))
+            except BaseException as exc:
+                worker_error.append(exc)
+                await queue.put(StreamEvent(
+                    type=StreamEventType.ERROR,
+                    error=str(exc),
+                ))
+            finally:
+                await queue.put(None)  # sentinel
 
-        for event in events:
-            yield event
+        task = asyncio.create_task(run_worker())
 
-        yield StreamEvent(
-            type=StreamEventType.DONE,
-            content=result.content,
-        )
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield event
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        if worker_error:
+            raise worker_error[0]
