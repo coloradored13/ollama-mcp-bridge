@@ -484,7 +484,8 @@ class ParameterValidator:
                 errors.append(f"Schema validation: {e.message}")
                 return ValidationResult(valid=False, sanitized_params=sanitized, errors=errors)
 
-        # L2: Type-specific security checks
+        # L2: Type-specific security checks on declared properties, then
+        # recursive scan of all values for string-level threats.
         if "properties" in schema:
             for param_name, param_def in schema["properties"].items():
                 if param_name not in params:
@@ -492,6 +493,11 @@ class ParameterValidator:
                 value = params[param_name]
                 param_errors = self._check_param_security(param_name, value, param_def)
                 errors.extend(param_errors)
+
+        # Recursive deep scan: catch dangerous strings inside nested objects
+        # and arrays that L2's schema-driven iteration can't reach.
+        deep_errors = self._deep_scan_values(params)
+        errors.extend(deep_errors)
 
         return ValidationResult(
             valid=len(errors) == 0,
@@ -507,19 +513,7 @@ class ParameterValidator:
         param_type = schema.get("type", "string")
 
         if param_type == "string" and isinstance(value, str):
-            # Length check
-            if len(value) > 10000:
-                errors.append(f"Parameter '{name}': exceeds maximum length (10000)")
-
-            # Shell metacharacter check
-            if self.DANGEROUS_CHARS.search(value):
-                errors.append(
-                    f"Parameter '{name}': contains potentially dangerous characters"
-                )
-
-            # Path traversal check
-            if self.PATH_TRAVERSAL.search(value):
-                errors.append(f"Parameter '{name}': contains path traversal pattern")
+            errors.extend(self._check_string_security(name, value))
 
         elif param_type == "number" or param_type == "integer":
             if isinstance(value, float):
@@ -537,6 +531,47 @@ class ParameterValidator:
             if len(value) > 1000:
                 errors.append(f"Parameter '{name}': array length {len(value)} exceeds maximum (1000)")
 
+        return errors
+
+    def _check_string_security(self, name: str, value: str) -> list[str]:
+        """String-specific security checks: length, metacharacters, path traversal."""
+        errors: list[str] = []
+        if len(value) > 10000:
+            errors.append(f"Parameter '{name}': exceeds maximum length (10000)")
+        if self.DANGEROUS_CHARS.search(value):
+            errors.append(
+                f"Parameter '{name}': contains potentially dangerous characters"
+            )
+        if self.PATH_TRAVERSAL.search(value):
+            errors.append(f"Parameter '{name}': contains path traversal pattern")
+        return errors
+
+    def _deep_scan_values(
+        self, obj: Any, path: str = "$", depth: int = 0
+    ) -> list[str]:
+        """Recursively scan all values for string-level threats.
+
+        This catches dangerous strings buried inside nested dicts and arrays
+        that the schema-driven L2 checks miss (since L2 only iterates
+        top-level declared properties).
+        """
+        if depth > 10:
+            return []
+        errors: list[str] = []
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                child_path = f"{path}.{key}"
+                if isinstance(value, str):
+                    errors.extend(self._check_string_security(child_path, value))
+                else:
+                    errors.extend(self._deep_scan_values(value, child_path, depth + 1))
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                child_path = f"{path}[{i}]"
+                if isinstance(item, str):
+                    errors.extend(self._check_string_security(child_path, item))
+                else:
+                    errors.extend(self._deep_scan_values(item, child_path, depth + 1))
         return errors
 
     @staticmethod

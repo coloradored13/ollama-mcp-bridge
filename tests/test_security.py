@@ -703,3 +703,89 @@ class TestSEC14_EmptySchemaBypass:
         )
         result = self.validator.validate(tool, {})
         assert result.valid
+
+
+class TestNestedParameterValidation:
+    """Nested objects and arrays must receive the same security checks as top-level strings."""
+
+    validator = ParameterValidator()
+
+    def _make_tool(self, schema: dict) -> ApprovedTool:
+        return ApprovedTool(
+            server="s", name="t", description="test",
+            input_schema=schema,
+            classification=ActionClass.WRITE,
+            definition_hash="x",
+        )
+
+    def test_nested_path_traversal_blocked(self):
+        tool = self._make_tool({
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                    },
+                },
+            },
+        })
+        result = self.validator.validate(tool, {"data": {"path": "../../etc/passwd"}})
+        assert not result.valid
+        assert any("path traversal" in e for e in result.errors)
+
+    def test_nested_shell_metachar_blocked(self):
+        tool = self._make_tool({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+            },
+        })
+        result = self.validator.validate(tool, {"items": [{"cmd": "$(whoami)"}]})
+        assert not result.valid
+        assert any("dangerous characters" in e for e in result.errors)
+
+    def test_array_of_strings_checked(self):
+        tool = self._make_tool({
+            "type": "object",
+            "properties": {
+                "commands": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+        })
+        result = self.validator.validate(tool, {"commands": ["safe", "ls; rm -rf /"]})
+        assert not result.valid
+        assert any("dangerous characters" in e for e in result.errors)
+
+    def test_deeply_nested_traversal_blocked(self):
+        tool = self._make_tool({
+            "type": "object",
+            "properties": {
+                "a": {"type": "object"},
+            },
+        })
+        result = self.validator.validate(tool, {
+            "a": {"b": {"c": {"file": "../../../etc/shadow"}}},
+        })
+        assert not result.valid
+        assert any("path traversal" in e for e in result.errors)
+
+    def test_clean_nested_values_pass(self):
+        tool = self._make_tool({
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                    },
+                },
+            },
+        })
+        result = self.validator.validate(tool, {"data": {"name": "safe value"}})
+        assert result.valid

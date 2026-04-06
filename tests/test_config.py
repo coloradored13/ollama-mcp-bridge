@@ -53,6 +53,13 @@ class TestSecurityConfig:
         with pytest.raises(ValueError, match="cannot exceed"):
             SecurityConfig(max_turns=100, max_turns_hard_cap=50)
 
+    def test_max_turns_validation_field_order_independent(self):
+        """Validation works regardless of which field is set first in kwargs."""
+        # hard_cap explicitly lower than max_turns — must fail even if
+        # hard_cap is parsed after max_turns in the model definition
+        with pytest.raises(ValueError, match="cannot exceed"):
+            SecurityConfig(max_turns_hard_cap=5, max_turns=10)
+
     def test_custom_detectors(self):
         cfg = SecurityConfig(
             enabled_detectors=["instruction_language", "exfiltration_pattern"]
