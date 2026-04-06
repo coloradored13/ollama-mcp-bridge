@@ -55,6 +55,7 @@ def _make_live_config(
     auto_approve: bool = False,
     require_approval: bool = True,
     allowed_tools: list[str] | None = None,
+    max_turns: int = 3,
 ) -> BridgeConfig:
     """Build a BridgeConfig pointing at the real test MCP server."""
     return BridgeConfig(
@@ -69,8 +70,8 @@ def _make_live_config(
         security=SecurityConfig(
             auto_approve_first_seen=auto_approve,
             require_first_run_approval=require_approval,
-            max_turns=3,
-            max_tool_calls_per_session=10,
+            max_turns=max_turns,
+            max_tool_calls_per_session=20,
             rate_limit_per_server=10,
             approval_registry_path=str(tmp_path / "approved_tools.json"),
         ),
@@ -330,16 +331,56 @@ class TestLiveSecurityPipeline:
                     assert "QUARANTINED" not in tc.result_summary
 
 
-# --- Multi-turn Flow ---
+# --- Multi-tool and Multi-step Flow ---
 
 
 @requires_ollama
-class TestLiveMultiTurn:
-    """Verify the conversation loop works with real model + tools."""
+class TestLiveMultiTool:
+    """Verify model uses multiple distinct tools in a single conversation."""
 
     @pytest.mark.asyncio
-    async def test_multi_tool_conversation(self, tmp_path, ollama_model):
-        """Model can call multiple different tools in one conversation."""
+    async def test_two_different_tools_called(self, tmp_path, ollama_model):
+        """Model calls both echo and add in the same conversation."""
+        config = _make_live_config(
+            tmp_path, auto_approve=True, require_approval=False,
+            max_turns=5,
+        )
+        bridge = Bridge(config)
+
+        async with bridge:
+            result = await bridge.run(
+                'Step 1: Use the echo tool with text "ping". '
+                "Step 2: Use the add tool to compute 7 + 8. "
+                "Do both steps. Report each result.",
+                model=ollama_model,
+                system_prompt=(
+                    "You MUST use tools to complete requests. "
+                    "Use the echo tool for echoing text and the add tool for math. "
+                    "Complete all steps before giving your final answer."
+                ),
+            )
+
+            tool_names_called = {tc.tool_name for tc in result.tool_calls if not tc.blocked}
+            # Both tools must have been called
+            assert "echo" in tool_names_called, (
+                f"echo not called. Tools called: {tool_names_called}. "
+                f"Full result: {result.content[:200]}"
+            )
+            assert "add" in tool_names_called, (
+                f"add not called. Tools called: {tool_names_called}. "
+                f"Full result: {result.content[:200]}"
+            )
+            # Verify the add tool got correct arguments
+            add_calls = [tc for tc in result.tool_calls if tc.tool_name == "add" and not tc.blocked]
+            assert len(add_calls) >= 1
+            # The model should have passed numbers that sum correctly
+            assert "15" in result.content, (
+                f"Expected '15' in response. Got: {result.content[:300]}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_echo_result_appears_in_response(self, tmp_path, ollama_model):
+        """Model relays the exact tool result back to the user."""
         config = _make_live_config(
             tmp_path, auto_approve=True, require_approval=False,
         )
@@ -347,19 +388,143 @@ class TestLiveMultiTurn:
 
         async with bridge:
             result = await bridge.run(
-                "First echo 'hello', then add 10 + 20. "
-                "Report both results.",
+                'Use the echo tool to echo "BRIDGE_MARKER_7x9q". '
+                "Then tell me exactly what the tool returned.",
                 model=ollama_model,
                 system_prompt=(
-                    "You have echo and add tools. Use both as requested. "
-                    "Call echo first, then add."
+                    "Use the echo tool when asked. Report the exact text "
+                    "the tool returned, without modification."
                 ),
             )
 
-            tool_names_called = {tc.tool_name for tc in result.tool_calls}
-            # Model should have called at least one tool
-            assert len(result.tool_calls) >= 1
-            # Ideally both, but models are unpredictable — at least verify
-            # the conversation completed without error
-            assert result.content != ""
-            assert result.turns >= 1
+            echo_calls = [tc for tc in result.tool_calls if tc.tool_name == "echo" and not tc.blocked]
+            assert len(echo_calls) >= 1
+            # The unique marker should appear in the tool result summary
+            assert "BRIDGE_MARKER_7x9q" in echo_calls[0].result_summary
+            # And the model should relay it
+            assert "BRIDGE_MARKER_7x9q" in result.content
+
+    @pytest.mark.asyncio
+    async def test_multiple_add_calls(self, tmp_path, ollama_model):
+        """Model calls the same tool multiple times with different arguments."""
+        config = _make_live_config(
+            tmp_path, auto_approve=True, require_approval=False,
+            max_turns=5,
+        )
+        bridge = Bridge(config)
+
+        async with bridge:
+            result = await bridge.run(
+                "Compute these two sums using the add tool: "
+                "1) 100 + 200 "
+                "2) 33 + 44 "
+                "Report both results.",
+                model=ollama_model,
+                system_prompt=(
+                    "Use the add tool for each computation. "
+                    "You must call the add tool twice — once for each sum. "
+                    "Report both results."
+                ),
+            )
+
+            add_calls = [tc for tc in result.tool_calls if tc.tool_name == "add" and not tc.blocked]
+            assert len(add_calls) >= 2, (
+                f"Expected 2 add calls, got {len(add_calls)}. "
+                f"All calls: {[(tc.tool_name, tc.arguments) for tc in result.tool_calls]}"
+            )
+            # Both results should appear
+            assert "300" in result.content
+            assert "77" in result.content
+
+
+@requires_ollama
+class TestLiveMultiStep:
+    """Verify model chains tool results — uses output from one call as input to another."""
+
+    @pytest.mark.asyncio
+    async def test_chain_echo_then_reference_result(self, tmp_path, ollama_model):
+        """Model uses echo, then references that result in its response."""
+        config = _make_live_config(
+            tmp_path, auto_approve=True, require_approval=False,
+            max_turns=5,
+        )
+        bridge = Bridge(config)
+
+        async with bridge:
+            result = await bridge.run(
+                'Use the echo tool to echo "secret_code_42". '
+                "Then use the add tool to add 20 + 22. "
+                "Tell me: does the echo result contain the same number as the sum?",
+                model=ollama_model,
+                system_prompt=(
+                    "Use tools in order. First echo, then add. "
+                    "Compare the results and answer the question."
+                ),
+            )
+
+            tool_names = [tc.tool_name for tc in result.tool_calls if not tc.blocked]
+            # Should have called both tools
+            assert "echo" in tool_names
+            assert "add" in tool_names
+            # Model should reference both results and make the comparison
+            # (echo returns "secret_code_42", add returns {"sum": 42})
+            assert "42" in result.content
+            assert result.turns >= 2  # At least 2 turns (tool calls + final response)
+
+    @pytest.mark.asyncio
+    async def test_add_result_feeds_next_add(self, tmp_path, ollama_model):
+        """Model uses the result of one add to inform the next."""
+        config = _make_live_config(
+            tmp_path, auto_approve=True, require_approval=False,
+            max_turns=6,
+        )
+        bridge = Bridge(config)
+
+        async with bridge:
+            result = await bridge.run(
+                "Use the add tool to compute 50 + 50. "
+                "Then use the add tool again to add 1 to that result. "
+                "What is the final number?",
+                model=ollama_model,
+                system_prompt=(
+                    "Use the add tool for all arithmetic. "
+                    "For the second addition, use the result from the first. "
+                    "You must call add twice."
+                ),
+            )
+
+            add_calls = [tc for tc in result.tool_calls if tc.tool_name == "add" and not tc.blocked]
+            assert len(add_calls) >= 2, (
+                f"Expected 2 add calls, got {len(add_calls)}. "
+                f"Calls: {[(tc.tool_name, tc.arguments) for tc in result.tool_calls]}"
+            )
+            # The second call should use 100 from the first result
+            second_call_args = add_calls[1].arguments
+            arg_values = [second_call_args.get("a", 0), second_call_args.get("b", 0)]
+            assert 100 in arg_values or 100.0 in arg_values, (
+                f"Second add call should use 100 from first result. "
+                f"Got args: {second_call_args}"
+            )
+            # Final answer should be 101
+            assert "101" in result.content
+
+    @pytest.mark.asyncio
+    async def test_conversation_turns_tracked(self, tmp_path, ollama_model):
+        """BridgeResult.turns reflects actual conversation turns."""
+        config = _make_live_config(
+            tmp_path, auto_approve=True, require_approval=False,
+        )
+        bridge = Bridge(config)
+
+        async with bridge:
+            result = await bridge.run(
+                "Use the add tool to compute 1 + 1.",
+                model=ollama_model,
+                system_prompt="Use the add tool for math.",
+            )
+
+            # At least 2 turns: model calls tool (turn 1), model gives final answer (turn 2)
+            if result.tool_calls:
+                assert result.turns >= 2, (
+                    f"With tool calls, expected >= 2 turns, got {result.turns}"
+                )
