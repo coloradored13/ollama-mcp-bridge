@@ -122,3 +122,58 @@ class TestAuditLoggerSecrets:
         content = (tmp_path / "audit.jsonl").read_text()
         entry = json.loads(content.strip())
         assert len(entry["params_hash"]) == 64  # SHA-256 hex
+
+
+class TestAuditSessionRetention:
+    """get_session_entries() must return ALL entries, not just unflushed buffer."""
+
+    def test_entries_survive_flush(self, tmp_path):
+        audit = AuditLogger(
+            audit_file=str(tmp_path / "audit.jsonl"),
+            session_id="test",
+        )
+
+        audit.log_tool_call(
+            server="s1", tool="t1", action_class=ActionClass.READ, params={"a": "1"},
+        )
+        audit.flush()
+        audit.log_tool_call(
+            server="s2", tool="t2", action_class=ActionClass.WRITE, params={"b": "2"},
+        )
+
+        entries = audit.get_session_entries()
+        assert len(entries) == 2
+        assert entries[0].tool_name == "t1"
+        assert entries[1].tool_name == "t2"
+
+    def test_tiny_buffer_limit_retains_all(self, tmp_path):
+        """Even with buffer_limit=1, all entries are available in session."""
+        audit = AuditLogger(
+            audit_file=str(tmp_path / "audit.jsonl"),
+            session_id="test",
+        )
+        audit._buffer_limit = 1  # force flush after every entry
+
+        for i in range(5):
+            audit.log_tool_call(
+                server="s", tool=f"t{i}", action_class=ActionClass.READ, params={},
+            )
+
+        entries = audit.get_session_entries()
+        assert len(entries) == 5
+        assert [e.tool_name for e in entries] == ["t0", "t1", "t2", "t3", "t4"]
+
+    def test_close_does_not_lose_entries(self, tmp_path):
+        """close() flushes to disk but session entries remain available."""
+        audit = AuditLogger(
+            audit_file=str(tmp_path / "audit.jsonl"),
+            session_id="test",
+        )
+
+        audit.log_tool_call(
+            server="s", tool="t", action_class=ActionClass.READ, params={"x": "y"},
+        )
+        audit.close()
+
+        entries = audit.get_session_entries()
+        assert len(entries) == 1
