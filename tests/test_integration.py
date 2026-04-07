@@ -2660,46 +2660,55 @@ class TestAuditCompleteness:
         assert len(taint_blocked) >= 1
 
     @pytest.mark.asyncio
-    async def test_every_exit_path_leaves_evidence(self, gateway_setup):
-        """Meta-test: after any execute_tool outcome, audit entry count grows.
+    async def test_every_exit_path_leaves_correct_evidence(self, gateway_setup):
+        """Meta-test: every exit path produces the RIGHT audit event type.
 
-        This is the core invariant — the prover cannot stay silent.
+        Not just "something was logged" — the event type must match the
+        outcome. A success must log TOOL_CALL, not TOOL_BLOCKED. A block
+        must log TOOL_BLOCKED, not TOOL_CALL. The prover cannot lie.
         """
         gateway, mcp, audit = gateway_setup
         await gateway.connect_and_scan()
 
-        before = len(audit.get_session_entries())
+        def last_event() -> AuditEntry:
+            return audit.get_session_entries()[-1]
 
-        # Successful call
+        # 1. Success → TOOL_CALL
         tc = OllamaToolCall(
             function_name="test-server__echo",
             arguments={"input": "hello"},
         )
         await gateway.execute_tool(tc, model_id="test", turn=0)
-        after_success = len(audit.get_session_entries())
-        assert after_success > before, "Success left no audit trace"
+        assert last_event().event_type == AuditEventType.TOOL_CALL, \
+            f"Success logged {last_event().event_type}, expected TOOL_CALL"
 
-        # Failed call (bad tool)
+        # 2. Unapproved tool → TOOL_BLOCKED
         tc_bad = OllamaToolCall(
             function_name="test-server__nope",
             arguments={"input": "hello"},
         )
-        try:
+        with pytest.raises(ToolBlockedError):
             await gateway.execute_tool(tc_bad, model_id="test", turn=1)
-        except Exception:
-            pass
-        after_fail = len(audit.get_session_entries())
-        assert after_fail > after_success, "Failure left no audit trace"
+        assert last_event().event_type == AuditEventType.TOOL_BLOCKED, \
+            f"Block logged {last_event().event_type}, expected TOOL_BLOCKED"
 
-        # MCP error
+        # 3. Param rejection → TOOL_BLOCKED
+        tc_param = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"wrong": "hello"},
+        )
+        with pytest.raises(ParameterRejectedError):
+            await gateway.execute_tool(tc_param, model_id="test", turn=2)
+        assert last_event().event_type == AuditEventType.TOOL_BLOCKED, \
+            f"Param rejection logged {last_event().event_type}, expected TOOL_BLOCKED"
+
+        # 4. MCP error → TOOL_ERROR
         mcp.call_tool = AsyncMock(side_effect=RuntimeError("boom"))
         tc_err = OllamaToolCall(
             function_name="test-server__echo",
             arguments={"input": "hello"},
         )
-        try:
-            await gateway.execute_tool(tc_err, model_id="test", turn=2)
-        except Exception:
-            pass
-        after_error = len(audit.get_session_entries())
-        assert after_error > after_fail, "MCP error left no audit trace"
+        with pytest.raises(MCPToolError):
+            await gateway.execute_tool(tc_err, model_id="test", turn=3)
+        assert last_event().event_type == AuditEventType.TOOL_ERROR, \
+            f"MCP error logged {last_event().event_type}, expected TOOL_ERROR"
