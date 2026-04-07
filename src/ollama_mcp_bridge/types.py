@@ -157,6 +157,7 @@ class RegistryEntry(BaseModel):
     notes: str | None = None
     last_seen_at: datetime | None = None
     denied_hashes: list[str] = Field(default_factory=list)
+    capabilities: dict[str, Any] = Field(default_factory=dict)  # capability manifest snapshot at approval
 
 
 class ToolState(str, Enum):
@@ -178,6 +179,91 @@ class ToolState(str, Enum):
     DENIED_BY_USER = "DENIED_BY_USER"
 
 
+class CapabilitySource(str, Enum):
+    """How a tool's capability manifest was determined.
+
+    CONFIG: Operator explicitly declared capabilities in bridge.toml.
+        Highest trust — operator knows exactly what the tool does.
+    MCP_DECLARED: MCP server provided capability metadata (future).
+        Medium trust — server may misrepresent capabilities.
+    INFERRED: Bridge inferred capabilities from tool name/description/schema.
+        Lowest trust — conservative heuristic, may be wrong in either direction.
+    """
+
+    CONFIG = "config"
+    MCP_DECLARED = "mcp_declared"
+    INFERRED = "inferred"
+
+
+class ToolCapabilityManifest(BaseModel):
+    """Explicit capability metadata for a tool — replaces name-pattern inference.
+
+    Each boolean flag declares a specific dangerous capability. The sink policy
+    engine uses these flags to classify sinks instead of relying on tool name
+    patterns (which are unreliable — a tool named "update_record" might actually
+    send HTTP requests).
+
+    Source of truth (priority order):
+    1. Explicit config overrides ([capabilities.<server>.<tool>] in bridge.toml)
+    2. MCP-side declarations (future — when MCP protocol supports it)
+    3. Conservative bridge inference (fallback heuristic from name/description/schema)
+
+    All flags default to False. Conservative inference should set flags True when
+    uncertain — false positives (blocking a safe tool) are better than false
+    negatives (allowing a dangerous tool unchecked).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    network_access: bool = False
+    outbound_data_transfer: bool = False
+    filesystem_read: bool = False
+    filesystem_write: bool = False
+    filesystem_delete: bool = False
+    memory_write: bool = False
+    external_messaging: bool = False
+    code_execution: bool = False
+    credential_access: bool = False
+    user_identity_impact: bool = False
+    destructive: bool = False
+    high_consequence: bool = False
+    source: CapabilitySource = CapabilitySource.INFERRED
+
+    @property
+    def is_dangerous(self) -> bool:
+        """True if any high-risk capability flag is set."""
+        return any([
+            self.outbound_data_transfer,
+            self.filesystem_delete,
+            self.external_messaging,
+            self.code_execution,
+            self.credential_access,
+            self.user_identity_impact,
+            self.destructive,
+            self.high_consequence,
+        ])
+
+    @property
+    def has_outbound_capability(self) -> bool:
+        """True if tool can send data externally."""
+        return self.network_access or self.outbound_data_transfer or self.external_messaging
+
+    @property
+    def has_filesystem_capability(self) -> bool:
+        """True if tool can interact with the filesystem."""
+        return self.filesystem_read or self.filesystem_write or self.filesystem_delete
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        """Compact representation for audit log entries."""
+        # Only include True flags to keep audit entries concise
+        flags = {
+            k: v for k, v in self.model_dump().items()
+            if v is True and k != "source"
+        }
+        flags["source"] = self.source.value
+        return flags
+
+
 class ApprovedTool(BaseModel):
     """Tool that has passed the full security ingestion pipeline.
 
@@ -186,6 +272,7 @@ class ApprovedTool(BaseModel):
     2. Scanned by all 7 sanitization detectors for poisoning
     3. Verified against its stored hash (rug-pull detection)
     4. Classified as READ/WRITE/DESTRUCTIVE
+    5. Assigned a capability manifest (config > MCP > inference)
 
     Receiving an ApprovedTool means security scanning HAS occurred.
     This is the type boundary between "untrusted MCP data" and
@@ -201,6 +288,7 @@ class ApprovedTool(BaseModel):
     input_schema: dict[str, Any]
     classification: ActionClass = ActionClass.WRITE
     definition_hash: str  # stored for ongoing integrity checks
+    capabilities: ToolCapabilityManifest = Field(default_factory=ToolCapabilityManifest)
 
     @property
     def namespaced_name(self) -> str:

@@ -30,7 +30,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .errors import ConfigError
-from .types import ActionClass
+from .types import ActionClass, CapabilitySource, ToolCapabilityManifest
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,7 @@ class BridgeConfig(BaseModel):
     servers: dict[str, ServerConfig] = Field(default_factory=dict)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    capabilities: dict[str, dict[str, ToolCapabilityManifest]] = Field(default_factory=dict)
 
     @field_validator("ollama_host")
     @classmethod
@@ -216,6 +217,13 @@ class BridgeConfig(BaseModel):
             return False
         return tool in server_config.allowed_tools
 
+    def get_capability_manifest(self, server: str, tool: str) -> ToolCapabilityManifest | None:
+        """Look up explicit capability manifest from config, or None if not declared."""
+        server_caps = self.capabilities.get(server)
+        if not server_caps:
+            return None
+        return server_caps.get(tool)
+
 
 def load_config(path: str | Path) -> BridgeConfig:
     """Load bridge configuration from a TOML file.
@@ -244,17 +252,39 @@ def load_config(path: str | Path) -> BridgeConfig:
     servers_raw = raw.get("servers", {})
     security_raw = raw.get("security", {})
     logging_raw = raw.get("logging", {})
+    capabilities_raw = raw.get("capabilities", {})
 
     try:
         servers = {name: ServerConfig(**cfg) for name, cfg in servers_raw.items()}
         security = SecurityConfig(**security_raw) if security_raw else SecurityConfig()
         logging_cfg = LoggingConfig(**logging_raw) if logging_raw else LoggingConfig()
 
+        # Parse [capabilities.<server>.<tool>] sections
+        capabilities: dict[str, dict[str, ToolCapabilityManifest]] = {}
+        for server_name, tools in capabilities_raw.items():
+            if not isinstance(tools, dict):
+                raise ConfigError(
+                    f"capabilities.{server_name} must be a table of tool configs"
+                )
+            capabilities[server_name] = {}
+            for tool_name, cap_fields in tools.items():
+                if not isinstance(cap_fields, dict):
+                    raise ConfigError(
+                        f"capabilities.{server_name}.{tool_name} must be a table"
+                    )
+                capabilities[server_name][tool_name] = ToolCapabilityManifest(
+                    source=CapabilitySource.CONFIG,
+                    **cap_fields,
+                )
+
         return BridgeConfig(
             ollama_host=bridge_raw.get("ollama_host", "http://127.0.0.1:11434"),
             servers=servers,
             security=security,
             logging=logging_cfg,
+            capabilities=capabilities,
         )
+    except ConfigError:
+        raise
     except Exception as e:
         raise ConfigError(f"Configuration validation failed: {e}") from e
