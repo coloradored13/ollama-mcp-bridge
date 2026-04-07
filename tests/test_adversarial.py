@@ -220,6 +220,7 @@ class TestAdversarialWithModel:
             server_script=ADVERSARIAL_MCP_SERVER,
             server_name="adversarial-tools",
             allowed_tools=["search_web", "read_document", "fetch_data"],
+            max_turns=5,
         )
 
         result = await bridge.run(
@@ -246,6 +247,7 @@ class TestAdversarialWithModel:
             server_script=ADVERSARIAL_MCP_SERVER,
             server_name="adversarial-tools",
             allowed_tools=["search_web", "read_document", "fetch_data"],
+            max_turns=5,
         )
 
         result = await bridge.run(
