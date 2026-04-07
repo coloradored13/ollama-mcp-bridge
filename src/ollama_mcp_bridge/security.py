@@ -80,6 +80,7 @@ from .types import (
     ApprovalMode,
     ApprovedTool,
     AuditEventType,
+    CapabilitySource,
     ConfirmationOutcome,
     ContentProvenance,
     ExecutionResult,
@@ -94,6 +95,7 @@ from .types import (
     SemanticRiskAssessment,
     SinkDecision,
     SourceType,
+    ToolCapabilityManifest,
     ToolSchema,
     ToolState,
     TrustLevel,
@@ -101,6 +103,9 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+from .capabilities import infer_capabilities as _infer_capabilities
 
 
 # --- Sanitization Detectors (SAD[2]) ---
@@ -976,11 +981,13 @@ class ToolApprovalRegistry:
         self,
         tool: ToolSchema,
         mode: ApprovalMode = ApprovalMode.AUTO_APPROVED,
+        capabilities: ToolCapabilityManifest | None = None,
     ) -> None:
         """Register or update a tool's approval with structured metadata."""
         key = self._key(tool.server, tool.name)
         now = datetime.now(timezone.utc)
         existing = self._entries.get(key)
+        cap_dict = capabilities.to_audit_dict() if capabilities is not None else {}
 
         if existing is not None:
             # Update existing entry — preserve denied_hashes, update hash and timestamps
@@ -994,6 +1001,7 @@ class ToolApprovalRegistry:
                 notes=existing.notes,
                 last_seen_at=now,
                 denied_hashes=existing.denied_hashes,
+                capabilities=cap_dict,
             )
         else:
             self._entries[key] = RegistryEntry(
@@ -1003,6 +1011,7 @@ class ToolApprovalRegistry:
                 approved_at=now,
                 approval_mode=mode,
                 last_seen_at=now,
+                capabilities=cap_dict,
             )
         self._save()
 
@@ -1367,11 +1376,15 @@ class SecurityGateway:
                 )
 
             self._tool_states[tool_key] = ToolState.APPROVED
-            self._registry.approve(original_tool, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
-
             approved_tool = self._make_approved_tool(
                 server, original_tool, pending.sanitization_result,
             )
+            self._registry.approve(
+                original_tool,
+                mode=ApprovalMode.FIRST_RUN_EXPLICIT,
+                capabilities=approved_tool.capabilities,
+            )
+
             self._approved_tools[approved_tool.namespaced_name] = approved_tool
             self._tools_by_server.setdefault(server, []).append(approved_tool)
 
@@ -1405,10 +1418,14 @@ class SecurityGateway:
                     )
 
             self._tool_states[tool_key] = ToolState.APPROVED
-            self._registry.approve(original_tool, mode=ApprovalMode.REAPPROVED)
 
             san_result = self._sanitizer.sanitize(original_tool)
             approved_tool = self._make_approved_tool(server, original_tool, san_result)
+            self._registry.approve(
+                original_tool,
+                mode=ApprovalMode.REAPPROVED,
+                capabilities=approved_tool.capabilities,
+            )
             self._approved_tools[approved_tool.namespaced_name] = approved_tool
             # Dedup guard: remove stale entry before appending (defensive)
             server_tools = self._tools_by_server.setdefault(server, [])
@@ -1537,6 +1554,12 @@ class SecurityGateway:
     ) -> ApprovedTool:
         """Create an ApprovedTool from a ToolSchema that passed all checks."""
         classification = self._config.get_tool_classification(server_name, tool.name)
+
+        # Capability manifest: config override > inference
+        capabilities = self._config.get_capability_manifest(server_name, tool.name)
+        if capabilities is None:
+            capabilities = _infer_capabilities(tool)
+
         return ApprovedTool(
             server=server_name,
             name=tool.name,
@@ -1544,6 +1567,7 @@ class SecurityGateway:
             input_schema=tool.input_schema,
             classification=classification,
             definition_hash=tool.definition_hash,
+            capabilities=capabilities,
         )
 
     async def connect_and_scan(self) -> ScanResult:
@@ -1669,8 +1693,12 @@ class SecurityGateway:
                 elif self._security.auto_approve_first_seen:
                     # Config: auto-approve first-seen (dev/test mode)
                     self._tool_states[tool_key] = ToolState.APPROVED
-                    self._registry.approve(tool, mode=ApprovalMode.AUTO_APPROVED)
                     approved_tool = self._make_approved_tool(server_name, tool, san_result)
+                    self._registry.approve(
+                        tool,
+                        mode=ApprovalMode.AUTO_APPROVED,
+                        capabilities=approved_tool.capabilities,
+                    )
                     approved_for_server.append(approved_tool)
                     self._approved_tools[approved_tool.namespaced_name] = approved_tool
                     logger.info(
@@ -1681,8 +1709,12 @@ class SecurityGateway:
                 elif not self._security.require_first_run_approval:
                     # Config: legacy mode — first-seen tools auto-approved
                     self._tool_states[tool_key] = ToolState.APPROVED
-                    self._registry.approve(tool, mode=ApprovalMode.AUTO_APPROVED)
                     approved_tool = self._make_approved_tool(server_name, tool, san_result)
+                    self._registry.approve(
+                        tool,
+                        mode=ApprovalMode.AUTO_APPROVED,
+                        capabilities=approved_tool.capabilities,
+                    )
                     approved_for_server.append(approved_tool)
                     self._approved_tools[approved_tool.namespaced_name] = approved_tool
 
@@ -1739,12 +1771,16 @@ class SecurityGateway:
                 # Approved by user
                 self._tool_states[tool_key] = ToolState.APPROVED
                 original_tool = self._pending_tool_schemas[tool_key]
-                self._registry.approve(original_tool, mode=ApprovalMode.FIRST_RUN_EXPLICIT)
 
                 approved_tool = self._make_approved_tool(
                     pending.server,
                     original_tool,
                     pending.sanitization_result,
+                )
+                self._registry.approve(
+                    original_tool,
+                    mode=ApprovalMode.FIRST_RUN_EXPLICIT,
+                    capabilities=approved_tool.capabilities,
                 )
                 self._approved_tools[approved_tool.namespaced_name] = approved_tool
                 self._tools_by_server.setdefault(pending.server, []).append(approved_tool)

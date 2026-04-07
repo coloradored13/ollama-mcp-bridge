@@ -238,15 +238,39 @@ class SinkPolicyEngine:
         return SinkDecision.ALLOW_WITH_NOTICE
 
     def _classify_sink(self, tool: ApprovedTool, args: dict[str, Any]) -> SinkType:
-        """Determine what kind of sink this tool call represents."""
-        if tool.classification == ActionClass.READ:
-            return SinkType.READ
+        """Determine what kind of sink this tool call represents.
 
-        # Check for outbound indicators in args
+        Priority order:
+        1. Argument-based outbound detection (ALWAYS runs — catches exfiltration
+           through non-outbound tools, e.g., a delete_file tool with a URL arg)
+        2. Capability manifest (typed, explicit)
+        3. ActionClass classification (config-driven)
+        4. Tool name patterns (last resort)
+        """
+        # 1. Argument-based outbound detection — always runs regardless of manifest.
+        # A tool with URLs/emails in args is suspicious even if its manifest says
+        # filesystem_delete. The model may be trying to exfiltrate through a
+        # non-outbound tool.
         if _args_contain_outbound_indicators(args):
             return SinkType.OUTBOUND
 
-        # Check for memory write by tool name
+        # 2. Capability manifest — typed and explicit
+        caps = tool.capabilities
+
+        if caps.has_outbound_capability:
+            return SinkType.OUTBOUND
+
+        if caps.memory_write:
+            return SinkType.MEMORY_WRITE
+
+        if caps.destructive or caps.filesystem_delete:
+            return SinkType.DESTRUCTIVE
+
+        # 3. ActionClass — config-driven classification
+        if tool.classification == ActionClass.READ:
+            return SinkType.READ
+
+        # 4. Tool name patterns — last resort fallback
         if _is_memory_write_tool(tool.name):
             return SinkType.MEMORY_WRITE
 

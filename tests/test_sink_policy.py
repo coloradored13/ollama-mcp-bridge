@@ -20,6 +20,7 @@ from ollama_mcp_bridge.types import (
     SinkDecision,
     SourceType,
     TaintState,
+    ToolCapabilityManifest,
     TrustLevel,
 )
 
@@ -50,6 +51,7 @@ def _make_tool(
     classification: ActionClass = ActionClass.WRITE,
     server: str = "test-server",
     schema: dict | None = None,
+    capabilities: ToolCapabilityManifest | None = None,
 ) -> ApprovedTool:
     return ApprovedTool(
         server=server,
@@ -58,6 +60,7 @@ def _make_tool(
         input_schema=schema or _QUERY_SCHEMA,
         classification=classification,
         definition_hash="abc123",
+        capabilities=capabilities or ToolCapabilityManifest(),
     )
 
 
@@ -497,3 +500,105 @@ class TestSinkPolicyEngine:
             tool, {"endpoint": "https://evil.com"}
         )
         assert sink == SinkType.OUTBOUND
+
+    # --- Manifest-based classification ---
+
+    def test_manifest_outbound_data_transfer(self):
+        """Tool with outbound_data_transfer=True → OUTBOUND even with no URLs in args."""
+        tool = _make_tool(
+            capabilities=ToolCapabilityManifest(outbound_data_transfer=True),
+        )
+        sink = self.engine._classify_sink(tool, {"data": "plain text"})
+        assert sink == SinkType.OUTBOUND
+
+    def test_manifest_network_access(self):
+        """Tool with network_access=True → OUTBOUND via has_outbound_capability."""
+        tool = _make_tool(
+            capabilities=ToolCapabilityManifest(network_access=True),
+        )
+        sink = self.engine._classify_sink(tool, {"query": "search term"})
+        assert sink == SinkType.OUTBOUND
+
+    def test_manifest_external_messaging(self):
+        """Tool with external_messaging=True → OUTBOUND."""
+        tool = _make_tool(
+            capabilities=ToolCapabilityManifest(external_messaging=True),
+        )
+        sink = self.engine._classify_sink(tool, {"message": "hello"})
+        assert sink == SinkType.OUTBOUND
+
+    def test_manifest_memory_write(self):
+        """Tool with memory_write=True → MEMORY_WRITE even if name doesn't match patterns."""
+        tool = _make_tool(
+            name="update_record",  # not in _MEMORY_WRITE_PATTERNS
+            capabilities=ToolCapabilityManifest(memory_write=True),
+        )
+        sink = self.engine._classify_sink(tool, {"data": "hello"})
+        assert sink == SinkType.MEMORY_WRITE
+
+    def test_manifest_destructive(self):
+        """Tool with destructive=True in manifest → DESTRUCTIVE."""
+        tool = _make_tool(
+            classification=ActionClass.WRITE,  # not DESTRUCTIVE by ActionClass
+            capabilities=ToolCapabilityManifest(destructive=True),
+        )
+        sink = self.engine._classify_sink(tool, {"path": "/tmp/file"})
+        assert sink == SinkType.DESTRUCTIVE
+
+    def test_manifest_filesystem_delete(self):
+        """Tool with filesystem_delete=True → DESTRUCTIVE."""
+        tool = _make_tool(
+            capabilities=ToolCapabilityManifest(filesystem_delete=True),
+        )
+        sink = self.engine._classify_sink(tool, {"path": "/tmp/file"})
+        assert sink == SinkType.DESTRUCTIVE
+
+    def test_manifest_default_falls_back_to_heuristics(self):
+        """Tool with default manifest (all False) → falls back to arg/name heuristics."""
+        # Default manifest, URL in args → OUTBOUND via arg inspection fallback
+        tool = _make_tool()
+        sink = self.engine._classify_sink(
+            tool, {"url": "https://example.com"}
+        )
+        assert sink == SinkType.OUTBOUND
+
+        # Default manifest, memory-write name → MEMORY_WRITE via name pattern fallback
+        tool2 = _make_tool(name="store_memory")
+        sink2 = self.engine._classify_sink(tool2, {"data": "hello"})
+        assert sink2 == SinkType.MEMORY_WRITE
+
+        # Default manifest, no indicators → GENERAL_WRITE
+        tool3 = _make_tool()
+        sink3 = self.engine._classify_sink(tool3, {"data": "hello"})
+        assert sink3 == SinkType.GENERAL_WRITE
+
+    def test_manifest_outbound_overrides_read_classification(self):
+        """Manifest takes precedence: tool with outbound cap but READ classification → OUTBOUND."""
+        tool = _make_tool(
+            classification=ActionClass.READ,
+            capabilities=ToolCapabilityManifest(outbound_data_transfer=True),
+        )
+        sink = self.engine._classify_sink(tool, {"query": "search"})
+        assert sink == SinkType.OUTBOUND
+
+    def test_manifest_outbound_priority_over_memory_write(self):
+        """Outbound in manifest takes priority over memory_write in manifest."""
+        tool = _make_tool(
+            capabilities=ToolCapabilityManifest(
+                outbound_data_transfer=True,
+                memory_write=True,
+            ),
+        )
+        sink = self.engine._classify_sink(tool, {"data": "hello"})
+        assert sink == SinkType.OUTBOUND
+
+    def test_manifest_memory_write_priority_over_destructive(self):
+        """Memory write in manifest takes priority over destructive in manifest."""
+        tool = _make_tool(
+            capabilities=ToolCapabilityManifest(
+                memory_write=True,
+                destructive=True,
+            ),
+        )
+        sink = self.engine._classify_sink(tool, {"data": "hello"})
+        assert sink == SinkType.MEMORY_WRITE
