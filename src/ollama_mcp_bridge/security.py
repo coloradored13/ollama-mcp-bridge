@@ -1879,6 +1879,12 @@ class SecurityGateway:
                     f"User denied destructive action: {approved.name}"
                 )
         elif gate_decision == GateDecision.DENIED:
+            self._audit.log_event(
+                AuditEventType.TOOL_DENIED,
+                server=approved.server,
+                tool=approved.name,
+                reason="Denied by action gate classification",
+            )
             raise ToolBlockedError(
                 f"Tool '{approved.name}' denied by gate",
                 reason="gate_denied",
@@ -1970,7 +1976,16 @@ class SecurityGateway:
             )
 
         # 6. Rate limit check (SR-9)
-        self._rate_limiter.check(approved.server, approved.name)
+        try:
+            self._rate_limiter.check(approved.server, approved.name)
+        except RateLimitError:
+            self._audit.log_event(
+                AuditEventType.RATE_LIMITED,
+                server=approved.server,
+                tool=approved.name,
+                reason="Rate limit exceeded",
+            )
+            raise
 
         # 7. Execute via MCP (the actual call)
         try:
@@ -1979,9 +1994,21 @@ class SecurityGateway:
                 approved.name,
                 validation.sanitized_params,
             )
-        except MCPToolError:
+        except MCPToolError as e:
+            self._audit.log_event(
+                AuditEventType.TOOL_ERROR,
+                server=approved.server,
+                tool=approved.name,
+                reason=f"MCP tool error: {e.safe_message}",
+            )
             raise
         except Exception as e:
+            self._audit.log_event(
+                AuditEventType.TOOL_ERROR,
+                server=approved.server,
+                tool=approved.name,
+                reason=f"Execution failed: {str(e)[:200]}",
+            )
             raise MCPToolError(
                 f"Execution failed: {e}",
                 safe_message=str(e)[:200],

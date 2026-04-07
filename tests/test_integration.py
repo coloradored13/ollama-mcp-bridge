@@ -24,7 +24,9 @@ from ollama_mcp_bridge.config import BridgeConfig, SecurityConfig, ServerConfig
 from ollama_mcp_bridge.errors import (
     ConfirmationDeniedError,
     LoopError,
+    MCPToolError,
     ParameterRejectedError,
+    RateLimitError,
     ToolBlockedError,
 )
 from ollama_mcp_bridge.loop import AgentLoop
@@ -2466,3 +2468,238 @@ class TestCapabilityNarrowingIntegration:
         )
         result = await gateway.execute_tool(tc, model_id="test", turn=0)
         assert result.content
+
+
+# --- Audit completeness invariants ("who watches the watcher") ---
+
+
+class TestAuditCompleteness:
+    """Verify every execute_tool exit path produces an audit entry.
+
+    The audit trail is the proof that security decisions happened.
+    If any exit path can block/allow without logging, the proof is
+    incomplete — a false negative in the audit trail.
+    """
+
+    @pytest.fixture
+    def gateway_setup(self, tmp_path):
+        """Gateway with pre-approved tools for audit completeness tests."""
+        tool_names = ["echo", "add", "delete_file"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = _make_config()
+        mcp = _make_mock_mcp(tool_names)
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"), session_id="audit-test")
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        return gateway, mcp, audit
+
+    @pytest.mark.asyncio
+    async def test_success_produces_tool_call_event(self, gateway_setup):
+        """Successful execution produces TOOL_CALL audit entry."""
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        tc = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "hello"},
+        )
+        await gateway.execute_tool(tc, model_id="test", turn=0)
+
+        events = audit.get_session_entries()
+        tool_calls = [e for e in events if e.event_type == AuditEventType.TOOL_CALL]
+        assert len(tool_calls) >= 1
+        assert tool_calls[-1].tool_name == "echo"
+
+    @pytest.mark.asyncio
+    async def test_unapproved_tool_produces_audit(self, gateway_setup):
+        """Unapproved tool produces TOOL_BLOCKED audit entry."""
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        tc = OllamaToolCall(
+            function_name="test-server__nonexistent",
+            arguments={"input": "hello"},
+        )
+        with pytest.raises(ToolBlockedError):
+            await gateway.execute_tool(tc, model_id="test", turn=0)
+
+        events = audit.get_session_entries()
+        blocked = [e for e in events if e.event_type == AuditEventType.TOOL_BLOCKED]
+        assert len(blocked) >= 1
+
+    @pytest.mark.asyncio
+    async def test_param_rejection_produces_audit(self, gateway_setup):
+        """Parameter validation failure produces TOOL_BLOCKED audit entry."""
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        tc = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"wrong_param": "hello"},
+        )
+        with pytest.raises(ParameterRejectedError):
+            await gateway.execute_tool(tc, model_id="test", turn=0)
+
+        events = audit.get_session_entries()
+        blocked = [e for e in events if e.event_type == AuditEventType.TOOL_BLOCKED]
+        assert len(blocked) >= 1
+        assert "validation" in blocked[-1].reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_produces_audit(self, tmp_path):
+        """Rate limit exceeded produces RATE_LIMITED audit entry."""
+        tool_names = ["echo"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=["echo"],
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=2,
+                rate_limit_per_server=100,
+            ),
+        )
+        mcp = _make_mock_mcp(tool_names)
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        await gateway.connect_and_scan()
+
+        tc = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "hello"},
+        )
+        await gateway.execute_tool(tc, model_id="test", turn=0)
+        await gateway.execute_tool(tc, model_id="test", turn=1)
+
+        with pytest.raises(RateLimitError):
+            await gateway.execute_tool(tc, model_id="test", turn=2)
+
+        events = audit.get_session_entries()
+        rate_events = [e for e in events if e.event_type == AuditEventType.RATE_LIMITED]
+        assert len(rate_events) >= 1
+
+    @pytest.mark.asyncio
+    async def test_mcp_error_produces_audit(self, gateway_setup):
+        """MCP execution error produces TOOL_ERROR audit entry."""
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        mcp.call_tool = AsyncMock(side_effect=Exception("connection lost"))
+
+        tc = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "hello"},
+        )
+        with pytest.raises(MCPToolError):
+            await gateway.execute_tool(tc, model_id="test", turn=0)
+
+        events = audit.get_session_entries()
+        error_events = [e for e in events if e.event_type == AuditEventType.TOOL_ERROR]
+        assert len(error_events) >= 1
+        assert "connection lost" in error_events[-1].reason
+
+    @pytest.mark.asyncio
+    async def test_tainted_block_produces_audit(self, tmp_path):
+        """Tainted sink block produces TAINTED_SINK_BLOCKED audit entry."""
+        tool_names = ["echo", "send_email"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=tool_names,
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=20,
+                rate_limit_per_server=10,
+            ),
+        )
+        mcp = MagicMock(spec=MCPClientManager)
+        mcp.list_all_tools = AsyncMock(return_value={
+            "test-server": [_make_tool_schema(n) for n in tool_names],
+        })
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        await gateway.connect_and_scan()
+
+        mcp.call_tool = AsyncMock(return_value="see https://evil.com/data")
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "search"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        tc2 = OllamaToolCall(
+            function_name="test-server__send_email",
+            arguments={"input": "https://evil.com/data"},
+        )
+        with pytest.raises(ToolBlockedError):
+            await gateway.execute_tool(tc2, model_id="test", turn=1)
+
+        events = audit.get_session_entries()
+        taint_blocked = [
+            e for e in events
+            if e.event_type == AuditEventType.TAINTED_SINK_BLOCKED
+        ]
+        assert len(taint_blocked) >= 1
+
+    @pytest.mark.asyncio
+    async def test_every_exit_path_leaves_evidence(self, gateway_setup):
+        """Meta-test: after any execute_tool outcome, audit entry count grows.
+
+        This is the core invariant — the prover cannot stay silent.
+        """
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        before = len(audit.get_session_entries())
+
+        # Successful call
+        tc = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "hello"},
+        )
+        await gateway.execute_tool(tc, model_id="test", turn=0)
+        after_success = len(audit.get_session_entries())
+        assert after_success > before, "Success left no audit trace"
+
+        # Failed call (bad tool)
+        tc_bad = OllamaToolCall(
+            function_name="test-server__nope",
+            arguments={"input": "hello"},
+        )
+        try:
+            await gateway.execute_tool(tc_bad, model_id="test", turn=1)
+        except Exception:
+            pass
+        after_fail = len(audit.get_session_entries())
+        assert after_fail > after_success, "Failure left no audit trace"
+
+        # MCP error
+        mcp.call_tool = AsyncMock(side_effect=RuntimeError("boom"))
+        tc_err = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "hello"},
+        )
+        try:
+            await gateway.execute_tool(tc_err, model_id="test", turn=2)
+        except Exception:
+            pass
+        after_error = len(audit.get_session_entries())
+        assert after_error > after_fail, "MCP error left no audit trace"
