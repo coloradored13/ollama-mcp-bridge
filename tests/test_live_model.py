@@ -32,6 +32,7 @@ class TestModelToolExecution:
             ),
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         echo_calls = [tc for tc in result.tool_calls if tc.tool_name == "echo"]
         assert len(echo_calls) >= 1
         assert not echo_calls[0].blocked
@@ -50,6 +51,7 @@ class TestModelToolExecution:
             ),
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         add_calls = [tc for tc in result.tool_calls if tc.tool_name == "add"]
         assert len(add_calls) >= 1
         assert not add_calls[0].blocked
@@ -70,6 +72,7 @@ class TestModelToolExecution:
             ),
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         echo_calls = [tc for tc in result.tool_calls if tc.tool_name == "echo" and not tc.blocked]
         assert len(echo_calls) >= 1
         assert "BRIDGE_MARKER_7x9q" in echo_calls[0].result_summary
@@ -86,6 +89,7 @@ class TestModelToolExecution:
             system_prompt="Use the echo tool when asked to echo something.",
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         assert len(result.tool_calls) >= 1
         tool_call_entries = [
             e for e in result.audit_log if e.event_type.value == "tool_call"
@@ -114,6 +118,7 @@ class TestModelSecurityPipeline:
             system_prompt="Use the add tool for arithmetic.",
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         add_calls = [tc for tc in result.tool_calls if tc.tool_name == "add"]
         if add_calls:
             assert add_calls[0].blocked
@@ -129,6 +134,7 @@ class TestModelSecurityPipeline:
             system_prompt="Use the echo tool. Just report what it returns.",
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         for tc in result.tool_calls:
             if tc.tool_name == "echo" and not tc.blocked:
                 assert "QUARANTINED" not in tc.result_summary
@@ -144,6 +150,7 @@ class TestModelSecurityPipeline:
             system_prompt="Use the add tool for math.",
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         if result.tool_calls:
             assert result.turns >= 2, (
                 f"With tool calls, expected >= 2 turns, got {result.turns}"

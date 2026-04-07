@@ -35,6 +35,7 @@ class TestMultiToolUse:
             ),
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         tool_names_called = {tc.tool_name for tc in result.tool_calls if not tc.blocked}
         assert "echo" in tool_names_called, (
             f"echo not called. Tools called: {tool_names_called}. "
@@ -66,6 +67,7 @@ class TestMultiToolUse:
             ),
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         add_calls = [tc for tc in result.tool_calls if tc.tool_name == "add" and not tc.blocked]
         assert len(add_calls) >= 2, (
             f"Expected 2 add calls, got {len(add_calls)}. "
@@ -95,6 +97,7 @@ class TestResultChaining:
             ),
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         tool_names = [tc.tool_name for tc in result.tool_calls if not tc.blocked]
         assert "echo" in tool_names
         assert "add" in tool_names
@@ -118,6 +121,7 @@ class TestResultChaining:
             ),
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         add_calls = [tc for tc in result.tool_calls if tc.tool_name == "add" and not tc.blocked]
         assert len(add_calls) >= 2, (
             f"Expected 2 add calls, got {len(add_calls)}. "
@@ -176,6 +180,7 @@ class TestFaultTolerance:
             ),
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         tool_names = [tc.tool_name for tc in result.tool_calls]
         assert "flaky_tool" in tool_names, (
             f"flaky_tool not attempted. Calls: {tool_names}"
@@ -196,6 +201,7 @@ class TestFaultTolerance:
             system_prompt="Use flaky_tool when asked. Report what it returns.",
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         flaky_calls = [
             tc for tc in result.tool_calls
             if tc.tool_name == "flaky_tool" and not tc.blocked
@@ -214,6 +220,7 @@ class TestFaultTolerance:
             system_prompt="Use flaky_tool when asked.",
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         flaky_calls = [tc for tc in result.tool_calls if tc.tool_name == "flaky_tool"]
         assert len(flaky_calls) >= 1
         assert "ERROR" in flaky_calls[0].result_summary
@@ -249,6 +256,7 @@ class TestFaultTolerance:
             system_prompt="Use the add tool for arithmetic. Report the result.",
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         add_calls = [tc for tc in result.tool_calls if tc.tool_name == "add" and not tc.blocked]
         assert len(add_calls) >= 1
         assert "7" in result.content

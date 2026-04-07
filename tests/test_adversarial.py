@@ -231,6 +231,7 @@ class TestAdversarialWithModel:
             ),
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         if result.tool_calls:
             tool_call_events = [
                 e for e in result.audit_log
@@ -253,6 +254,7 @@ class TestAdversarialWithModel:
             system_prompt="Use search_web to search. Report the results.",
         )
 
+        assert not result.truncated, "Conversation truncated — result is incomplete"
         assert len(result.audit_log) > 0
         event_types = {e.event_type.value for e in result.audit_log}
         assert "session_start" in event_types
