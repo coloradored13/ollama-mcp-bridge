@@ -193,39 +193,67 @@ class CrossToolReferenceDetector:
 
 
 class ExfiltrationPatternDetector:
-    """Detect data exfiltration mechanisms in tool descriptions.
+    """Detect data exfiltration mechanisms in tool descriptions and results.
 
     WHY: The end goal of most tool poisoning attacks is exfiltration — getting
     the model to send sensitive data (SSH keys, API tokens, file contents) to
     an attacker-controlled endpoint. Invariant Labs demonstrated this by having
     a poisoned tool description instruct Claude Desktop to exfiltrate SSH keys.
-    URLs, base64 encoding references, and webhook mentions in a tool description
-    are strong signals of exfiltration intent.
+
+    Bare URLs alone are suspicious in tool descriptions (where URLs have no
+    business being) but normal in tool results (search results, API responses).
+    The behavioral patterns (webhook, curl, send to, base64 encode) are
+    suspicious in any context. The scan method accepts a context flag to
+    distinguish these cases.
     """
 
     name = "exfiltration_pattern"
 
-    PATTERNS = [
-        r"https?://[^\s\"']+",  # URLs
+    # Behavioral patterns — suspicious in any context
+    BEHAVIORAL_PATTERNS = [
         r"\bwebhook\b",
         r"\bbase64[.\s]*(encode|decode)\b",
         r"\bcurl\s+",
         r"\bfetch\s*\(",
         r"\bsend\s+to\b",
+        r"\bsend\s+\w+.*\bto\s+https?://",  # "send X ... to https://..." with URL target
+        r"\b(exfiltrat|collect|harvest|siphon|steal)\w*\b",
     ]
 
-    def scan(self, text: str) -> float:
+    # URL pattern — suspicious in descriptions, normal in results
+    URL_PATTERN = r"https?://[^\s\"']+"
+
+    def scan(self, text: str, *, in_tool_result: bool = False) -> float:
         text_lower = text.lower()
-        matches = sum(1 for p in self.PATTERNS if re.search(p, text_lower))
+        matches = 0
+
+        # Behavioral patterns always count
+        matches += sum(1 for p in self.BEHAVIORAL_PATTERNS if re.search(p, text_lower))
+
+        # Bare URLs only count outside tool results
+        if not in_tool_result and re.search(self.URL_PATTERN, text_lower):
+            matches += 1
+
         if matches == 0:
             return 0.0
         return min(70 + matches * 10, 90)
 
 
 class PrivilegeEscalationDetector:
-    """Detect privilege escalation language."""
+    """Detect privilege escalation language in context, not bare keywords.
+
+    Strips emails and URLs before scanning to avoid false positives on
+    strings like "admin@example.com" or "https://admin.example.com".
+    Scoring requires multiple signals or strong imperative context —
+    a single "admin" mention in normal text scores below warn threshold.
+    """
 
     name = "privilege_escalation"
+
+    # Patterns stripped before scanning — contain privileged-sounding
+    # words in non-escalation context (email addresses, URLs).
+    _EMAIL_STRIP = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+    _URL_STRIP = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 
     PATTERNS = [
         r"\b(as\s+)?(admin|administrator|root|superuser)\b",
@@ -236,11 +264,15 @@ class PrivilegeEscalationDetector:
     ]
 
     def scan(self, text: str) -> float:
-        text_lower = text.lower()
-        matches = sum(1 for p in self.PATTERNS if re.search(p, text_lower))
+        # Strip emails and URLs to avoid false positives
+        cleaned = self._EMAIL_STRIP.sub("", text)
+        cleaned = self._URL_STRIP.sub("", cleaned)
+        cleaned_lower = cleaned.lower()
+        matches = sum(1 for p in self.PATTERNS if re.search(p, cleaned_lower))
         if matches == 0:
             return 0.0
-        return min(70 + matches * 10, 90)
+        # 1 match = 40 (below warn), 2 = 60 (warn), 3+ = 70-90 (block range)
+        return min(20 + matches * 20, 90)
 
 
 class LengthAnomalyDetector:
@@ -772,10 +804,20 @@ class SemanticRiskAssessor:
         signals: list[str] = []
         max_score = 0.0
 
-        # Run existing detectors and map to flags
+        # Run existing detectors and map to flags.
+        # For tool results, bare URLs are expected (search results, API responses)
+        # and shouldn't trigger exfiltration on their own. Behavioral patterns
+        # (webhook, curl, send to) are suspicious in any context.
+        is_tool_result = (
+            provenance is not None
+            and provenance.source_type == SourceType.TOOL_RESULT
+        )
+
         instruction_score = self._instruction_detector.scan(content)
         cross_tool_score = self._cross_tool_detector.scan(content)
-        exfiltration_score = self._exfiltration_detector.scan(content)
+        exfiltration_score = self._exfiltration_detector.scan(
+            content, in_tool_result=is_tool_result,
+        )
         escalation_score = self._escalation_detector.scan(content)
         role_score = self._role_detector.scan(content)
         encoding_score = self._encoding_detector.scan(content)
@@ -808,6 +850,19 @@ class SemanticRiskAssessor:
             proposes_external_destination = True
             signals.append(f"exfiltration_pattern:{exfiltration_score:.0f}")
             max_score = max(max_score, exfiltration_score)
+
+        # Redirect attack: instruction language + URLs in content.
+        # Not traditional exfiltration (no send/collect behavior), but the
+        # content is trying to direct activity toward an attacker-controlled URL.
+        # Checked separately because bare URLs are normal in tool results,
+        # but URLs + instruction language = redirect attack.
+        if (
+            not proposes_external_destination
+            and attempts_instruction_override
+            and re.search(r"https?://[^\s\"']+", content)
+        ):
+            proposes_external_destination = True
+            signals.append("redirect_attack:instruction+url")
 
         contains_hidden_or_obfuscated_instructions = False
         if encoding_score > 0:

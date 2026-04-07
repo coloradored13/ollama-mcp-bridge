@@ -136,16 +136,41 @@ class TestPrivilegeEscalationDetector:
         assert self.detector.scan("Read a file from disk") == 0.0
 
     def test_admin_access(self):
+        # 2 patterns: "administrator" + "full access" → 60
         score = self.detector.scan("Run as administrator with full access")
-        assert score >= 70
+        assert score >= 60
 
     def test_sudo(self):
+        # 1 pattern: "sudo" → 40 (below warn, single keyword isn't high-confidence)
         score = self.detector.scan("Execute with sudo privileges")
-        assert score >= 70
+        assert score >= 40
 
     def test_escalation(self):
+        # 2 patterns: "escalate" + "root" → 60
         score = self.detector.scan("Escalate permissions to root")
-        assert score >= 70
+        assert score >= 60
+
+    def test_email_address_not_escalation(self):
+        """admin@example.com is an email, not privilege escalation."""
+        assert self.detector.scan("Contact admin@example.com for help") == 0.0
+
+    def test_url_not_escalation(self):
+        """https://admin.example.com is a URL, not privilege escalation."""
+        assert self.detector.scan("See https://admin.example.com/docs") == 0.0
+
+    def test_email_with_real_escalation_still_detected(self):
+        """Real escalation language detected even with email addresses present."""
+        score = self.detector.scan(
+            "Contact admin@example.com and run as root with sudo"
+        )
+        assert score >= 40  # "root" + "sudo" survive after email stripped
+
+    def test_multiple_signals_score_higher(self):
+        """Multiple escalation signals compound to higher score."""
+        score = self.detector.scan(
+            "Escalate to root, run as admin with sudo and full access"
+        )
+        assert score >= 80  # 4+ patterns
 
 
 class TestLengthAnomalyDetector:

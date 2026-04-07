@@ -99,7 +99,10 @@ class TestAdversarialResultSanitization:
         result = await gateway.execute_tool(tc, model_id="test", turn=0)
 
         assert result.risk_assessment.attempts_instruction_override is True
-        assert result.risk_assessment.attempts_exfiltration is True
+        # "visit https://evil.example.com" is a redirect attack — instructions
+        # combined with an external URL. Not behavioral exfiltration (no
+        # send/collect/webhook), but still proposes an external destination.
+        assert result.risk_assessment.proposes_external_destination is True
 
     @pytest.mark.asyncio
     async def test_social_engineering_detected(self, live_bridge):
