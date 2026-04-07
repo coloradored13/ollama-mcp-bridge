@@ -113,7 +113,6 @@ SecurityGateway owns the MCP client. There is no code path from model intent to 
 - Safe adapters are opt-in. Without configuration, only taint-based sink policy and sanitization are active.
 - Small local models are unpredictable. The bridge constrains what they can *do*, not what they *think*.
 - No reconnect re-scan. If an MCP server restarts, cached tool definitions aren't refreshed until the bridge restarts.
-- Result sanitization produces CLEAN, REDACTED, or QUARANTINED tiers. The ANNOTATED tier is defined but not implemented.
 - Audit log rotation is not implemented. The audit file grows indefinitely; rotate manually between sessions.
 
 ## Hardening checklist
