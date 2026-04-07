@@ -100,6 +100,9 @@ class SecurityConfig(BaseModel):
     block_tainted_destructive_write: bool = True
     allowed_outbound_domains: list[str] = Field(default_factory=list)
     allow_memory_writes_from_third_party_content: bool = False
+    # Capability narrowing — safe adapters (opt-in, empty = disabled)
+    allowed_path_roots: list[str] = Field(default_factory=list)
+    approved_recipients: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def max_turns_within_hard_cap(self) -> "SecurityConfig":

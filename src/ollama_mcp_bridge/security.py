@@ -72,6 +72,7 @@ from .errors import (
     ToolBlockedError,
     ToolIntegrityError,
 )
+from .adapters import run_adapters
 from .mcp_client import MCPClientManager
 from .sink_policy import SinkPolicyEngine, TaintTracker
 from .types import (
@@ -1240,12 +1241,13 @@ class SecurityGateway:
         2. Validate parameters (JSON Schema + security checks)
         3. Action gate (human confirmation for destructive tools)
         4. Sink policy (taint tracking — block if args influenced by untrusted content)
-        5. Rate limit check (not exceeding call budgets)
-        6. Execute via MCP (the actual call to the tool server)
-        7. Sanitize result (scan for prompt injection in output)
-        8. Record result for taint tracking
-        9. Record for rate limiting
-        10. Audit log (write full record to JSON-L file)
+        5. Capability narrowing (safe adapters — validate arg structure)
+        6. Rate limit check (not exceeding call budgets)
+        7. Execute via MCP (the actual call to the tool server)
+        8. Sanitize result (scan for prompt injection in output)
+        9. Record result for taint tracking
+        10. Record for rate limiting
+        11. Audit log (write full record to JSON-L file)
 
     If any step fails, execution stops and an appropriate exception is raised.
     The model receives the exception as a tool result message so it can adapt
@@ -1953,10 +1955,24 @@ class SecurityGateway:
                     ),
                 )
 
-        # 5. Rate limit check (SR-9)
+        # 5. Capability narrowing — safe adapters (PR 8)
+        adapter_errors = run_adapters(approved, tool_call.arguments, self._security)
+        if adapter_errors:
+            self._audit.log_event(
+                AuditEventType.TOOL_BLOCKED,
+                server=approved.server,
+                tool=approved.name,
+                reason=f"Adapter rejected: {'; '.join(adapter_errors)}",
+            )
+            raise ParameterRejectedError(
+                f"Arguments rejected by safe adapters for '{approved.name}'",
+                errors=adapter_errors,
+            )
+
+        # 6. Rate limit check (SR-9)
         self._rate_limiter.check(approved.server, approved.name)
 
-        # 6. Execute via MCP (the actual call)
+        # 7. Execute via MCP (the actual call)
         try:
             raw_result = await self._mcp.call_tool(
                 approved.server,
@@ -1971,7 +1987,7 @@ class SecurityGateway:
                 safe_message=str(e)[:200],
             ) from e
 
-        # 7. Sanitize result and assess semantic risk (SR-6)
+        # 8. Sanitize result and assess semantic risk (SR-6)
         provenance = ContentProvenance(
             source_type=SourceType.TOOL_RESULT,
             trust_level=TrustLevel.THIRD_PARTY,
@@ -1991,7 +2007,7 @@ class SecurityGateway:
                 reason="Tool result contained suspected prompt injection",
             )
 
-        # 8. Record result for taint tracking (PR 7)
+        # 9. Record result for taint tracking (PR 7)
         self._taint_tracker.record_result(
             content=raw_result,
             origin_id=f"{approved.server}:{approved.name}",
@@ -1999,10 +2015,10 @@ class SecurityGateway:
             risk_assessment=risk_assessment,
         )
 
-        # 9. Record rate limit
+        # 10. Record rate limit
         self._rate_limiter.record_call(approved.server, approved.name)
 
-        # 10. Audit log
+        # 11. Audit log
         duration_ms = (time.time() - start_time) * 1000
         self._audit.log_tool_call(
             server=approved.server,
