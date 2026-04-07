@@ -383,6 +383,11 @@ def main():
     merge_junit_xml(tier_xmls, merged_xml_path)
     print(f"JUnit XML report: {merged_xml_path}")
 
+    # Cleanup per-tier XMLs — only the merged report should persist
+    for tier in TIERS:
+        per_tier = RESULTS_DIR / f"{tier['id']}.xml"
+        per_tier.unlink(missing_ok=True)
+
     total_failed = sum(t.failed for t in tier_results)
     total_passed = sum(t.passed for t in tier_results)
     print(f"\n{'=' * 60}")
