@@ -73,6 +73,7 @@ from .errors import (
     ToolIntegrityError,
 )
 from .mcp_client import MCPClientManager
+from .sink_policy import SinkPolicyEngine, TaintTracker
 from .types import (
     ActionClass,
     ApprovalMode,
@@ -90,6 +91,7 @@ from .types import (
     SanitizationResult,
     ScanResult,
     SemanticRiskAssessment,
+    SinkDecision,
     SourceType,
     ToolSchema,
     ToolState,
@@ -1237,11 +1239,13 @@ class SecurityGateway:
         1. Resolve tool (is this an approved tool?)
         2. Validate parameters (JSON Schema + security checks)
         3. Action gate (human confirmation for destructive tools)
-        4. Rate limit check (not exceeding call budgets)
-        5. Execute via MCP (the actual call to the tool server)
-        6. Sanitize result (scan for prompt injection in output)
-        7. Record for rate limiting
-        8. Audit log (write full record to JSON-L file)
+        4. Sink policy (taint tracking — block if args influenced by untrusted content)
+        5. Rate limit check (not exceeding call budgets)
+        6. Execute via MCP (the actual call to the tool server)
+        7. Sanitize result (scan for prompt injection in output)
+        8. Record result for taint tracking
+        9. Record for rate limiting
+        10. Audit log (write full record to JSON-L file)
 
     If any step fails, execution stops and an appropriate exception is raised.
     The model receives the exception as a tool result message so it can adapt
@@ -1273,6 +1277,8 @@ class SecurityGateway:
         self._risk_assessor = SemanticRiskAssessor()
         self._registry = registry or ToolApprovalRegistry(config.security.approval_registry_path)
         self._rate_limiter = RateLimiter(config.security)
+        self._taint_tracker = TaintTracker()
+        self._sink_policy = SinkPolicyEngine()
         self._gate = ActionGate(
             require_confirmation=config.security.require_confirmation_for_destructive,
             timeout_seconds=config.security.confirmation_timeout_seconds,
@@ -1876,10 +1882,81 @@ class SecurityGateway:
                 reason="gate_denied",
             )
 
-        # 4. Rate limit check (SR-9)
+        # 4. Sink policy — taint tracking (PR 7)
+        taint_state = self._taint_tracker.compute_taint(tool_call.arguments)
+        if taint_state.tainted:
+            sink_decision = self._sink_policy.evaluate(
+                tool=approved,
+                args=tool_call.arguments,
+                taint_state=taint_state,
+                config=self._security,
+            )
+
+            if sink_decision == SinkDecision.BLOCK:
+                self._audit.log_event(
+                    AuditEventType.TAINTED_SINK_BLOCKED,
+                    server=approved.server,
+                    tool=approved.name,
+                    reason=(
+                        f"Tainted args blocked: "
+                        f"sources={taint_state.taint_sources}, "
+                        f"fields={taint_state.affected_fields}"
+                    ),
+                )
+                raise ToolBlockedError(
+                    f"Tool '{approved.name}' blocked: arguments contain values "
+                    f"from untrusted tool results ({', '.join(taint_state.taint_sources)})",
+                    reason="tainted_sink_blocked",
+                )
+
+            if sink_decision == SinkDecision.REQUIRE_CONFIRMATION:
+                outcome = await self._gate.request_confirmation(
+                    server=approved.server,
+                    tool_name=approved.name,
+                    action_class="tainted_sink",
+                    arguments=tool_call.arguments,
+                )
+
+                if outcome == ConfirmationOutcome.CONFIRMED:
+                    self._audit.log_event(
+                        AuditEventType.TAINTED_SINK_CONFIRMED,
+                        server=approved.server,
+                        tool=approved.name,
+                        reason=(
+                            f"User confirmed tainted sink: "
+                            f"sources={taint_state.taint_sources}"
+                        ),
+                        confirmation_outcome=outcome.value,
+                    )
+                else:
+                    self._audit.log_event(
+                        AuditEventType.TAINTED_SINK_BLOCKED,
+                        server=approved.server,
+                        tool=approved.name,
+                        reason=f"Tainted sink not confirmed: {outcome.value}",
+                        confirmation_outcome=outcome.value,
+                    )
+                    raise ConfirmationDeniedError(
+                        f"Tainted sink confirmation {outcome.value} "
+                        f"for '{approved.name}'"
+                    )
+
+            if sink_decision == SinkDecision.ALLOW_WITH_NOTICE:
+                self._audit.log_event(
+                    AuditEventType.TAINTED_SINK_DETECTED,
+                    server=approved.server,
+                    tool=approved.name,
+                    reason=(
+                        f"Tainted args noticed (low-risk sink): "
+                        f"sources={taint_state.taint_sources}, "
+                        f"fields={taint_state.affected_fields}"
+                    ),
+                )
+
+        # 5. Rate limit check (SR-9)
         self._rate_limiter.check(approved.server, approved.name)
 
-        # 5. Execute via MCP (the actual call)
+        # 6. Execute via MCP (the actual call)
         try:
             raw_result = await self._mcp.call_tool(
                 approved.server,
@@ -1894,7 +1971,7 @@ class SecurityGateway:
                 safe_message=str(e)[:200],
             ) from e
 
-        # 6. Sanitize result and assess semantic risk (SR-6)
+        # 7. Sanitize result and assess semantic risk (SR-6)
         provenance = ContentProvenance(
             source_type=SourceType.TOOL_RESULT,
             trust_level=TrustLevel.THIRD_PARTY,
@@ -1914,10 +1991,18 @@ class SecurityGateway:
                 reason="Tool result contained suspected prompt injection",
             )
 
-        # 7. Record rate limit
+        # 8. Record result for taint tracking (PR 7)
+        self._taint_tracker.record_result(
+            content=raw_result,
+            origin_id=f"{approved.server}:{approved.name}",
+            provenance=provenance,
+            risk_assessment=risk_assessment,
+        )
+
+        # 9. Record rate limit
         self._rate_limiter.record_call(approved.server, approved.name)
 
-        # 8. Audit log
+        # 10. Audit log
         duration_ms = (time.time() - start_time) * 1000
         self._audit.log_tool_call(
             server=approved.server,
