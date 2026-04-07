@@ -350,6 +350,40 @@ class SemanticRiskAssessment(BaseModel):
     raw_signals: list[str] = Field(default_factory=list)
 
 
+class TaintState(BaseModel):
+    """Tracks whether tool call arguments were influenced by untrusted content.
+
+    Computed by TaintTracker: compares values in tool call arguments (URLs,
+    domains, emails, IPs) against values extracted from previous tool results.
+    If a match is found, the arguments are "tainted" — they were influenced by
+    content the system didn't originate and shouldn't blindly trust.
+
+    The SinkPolicyEngine uses TaintState to decide whether to allow, gate, or
+    block the tool call based on what kind of sink the target tool is.
+    """
+
+    tainted: bool = False
+    taint_sources: list[str] = Field(default_factory=list)
+    taint_reasons: list[str] = Field(default_factory=list)
+    affected_fields: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
+class SinkDecision(str, Enum):
+    """Policy decision for a tool call evaluated by SinkPolicyEngine.
+
+    ALLOW: Proceed normally — no taint concern or non-sensitive sink.
+    ALLOW_WITH_NOTICE: Tainted but low-risk sink. Logged to audit, not blocked.
+    REQUIRE_CONFIRMATION: Tainted + moderately sensitive sink. Human must confirm.
+    BLOCK: Tainted + sensitive sink (outbound/memory write). Blocked outright.
+    """
+
+    ALLOW = "ALLOW"
+    ALLOW_WITH_NOTICE = "ALLOW_WITH_NOTICE"
+    REQUIRE_CONFIRMATION = "REQUIRE_CONFIRMATION"
+    BLOCK = "BLOCK"
+
+
 class GateDecision(str, Enum):
     """Action gate decision (SAD[6])."""
 
@@ -472,6 +506,9 @@ class AuditEventType(str, Enum):
     TOOL_FIRST_APPROVED = "tool_first_approved"
     TOOL_FIRST_DENIED = "tool_first_denied"
     TOOL_REAPPROVAL_REQUIRED = "tool_reapproval_required"
+    TAINTED_SINK_DETECTED = "tainted_sink_detected"
+    TAINTED_SINK_BLOCKED = "tainted_sink_blocked"
+    TAINTED_SINK_CONFIRMED = "tainted_sink_confirmed"
     SESSION_START = "session_start"
     SESSION_END = "session_end"
 

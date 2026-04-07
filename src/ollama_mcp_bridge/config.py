@@ -94,6 +94,12 @@ class SecurityConfig(BaseModel):
     require_first_run_approval: bool = True
     auto_approve_first_seen: bool = False
     approval_registry_path: str = "~/.ollama-mcp-bridge/approved_tools.json"
+    # Sink policy — taint tracking and source-to-sink enforcement
+    tainted_sink_requires_confirmation: bool = True
+    block_tainted_exfiltration: bool = True
+    block_tainted_destructive_write: bool = True
+    allowed_outbound_domains: list[str] = Field(default_factory=list)
+    allow_memory_writes_from_third_party_content: bool = False
 
     @model_validator(mode="after")
     def max_turns_within_hard_cap(self) -> "SecurityConfig":
