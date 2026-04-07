@@ -59,6 +59,16 @@ TIERS = [
         "requires_model": False,
     },
     {
+        "name": "Adversarial Sink Policy",
+        "id": "adversarial_sink_policy",
+        "path": "tests/test_adversarial.py::TestAdversarialSinkPolicy",
+        "deselect": [
+            "tests/test_adversarial.py::TestAdversarialSinkPolicy::test_model_exfiltration_attempt_blocked",
+            "tests/test_adversarial.py::TestAdversarialSinkPolicy::test_model_subtle_redirect_blocked",
+        ],
+        "requires_model": False,
+    },
+    {
         "name": "Model Single-Tool",
         "id": "live_model",
         "path": "tests/test_live_model.py",
@@ -74,6 +84,12 @@ TIERS = [
         "name": "Adversarial Model-in-the-Loop",
         "id": "adversarial_model",
         "path": "tests/test_adversarial.py::TestAdversarialWithModel",
+        "requires_model": True,
+    },
+    {
+        "name": "Adversarial Sink Policy (Model)",
+        "id": "adversarial_sink_model",
+        "path": "tests/test_adversarial.py::TestAdversarialSinkPolicy::test_model_exfiltration_attempt_blocked tests/test_adversarial.py::TestAdversarialSinkPolicy::test_model_subtle_redirect_blocked",
         "requires_model": True,
     },
 ]
@@ -140,7 +156,7 @@ def run_tier(tier: dict, xml_path: Path) -> TierResult:
 
     cmd = [
         PYTHON, "-m", "pytest",
-        tier["path"],
+        *tier["path"].split(),
         f"--junit-xml={xml_path}",
         "-v", "--tb=short",
     ]
@@ -148,6 +164,10 @@ def run_tier(tier: dict, xml_path: Path) -> TierResult:
     # Add ignore flags for unit tier
     for ignore in tier.get("ignore", []):
         cmd.extend(["--ignore", ignore])
+
+    # Add deselect flags for excluding specific tests from a tier
+    for desel in tier.get("deselect", []):
+        cmd.extend(["--deselect", desel])
 
     proc = subprocess.run(
         cmd,
