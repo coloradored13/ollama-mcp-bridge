@@ -24,6 +24,7 @@ COMPONENTS:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 from dataclasses import dataclass, field
@@ -93,10 +94,14 @@ class TaintTracker:
     Records values (URLs, domains, emails, IPs) from each tool result.
     When a new tool call comes in, checks if its arguments contain any of
     those values — indicating the model is passing untrusted content to a tool.
+
+    Capped at max_results to prevent unbounded growth in long sessions.
+    Oldest results are dropped first (FIFO).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_results: int = 50) -> None:
         self._results: list[TrackedResult] = []
+        self._max_results = max_results
 
     def record_result(
         self,
@@ -123,6 +128,9 @@ class TaintTracker:
             values=values,
             risk_score=risk_score,
         ))
+        # Drop oldest if over capacity
+        if len(self._results) > self._max_results:
+            self._results = self._results[-self._max_results:]
 
     def compute_taint(self, args: dict[str, Any]) -> TaintState:
         """Check if tool call arguments contain values from previous tool results.
@@ -295,8 +303,13 @@ def _extract_values(text: str) -> list[ExtractedValue]:
 
     for match in _IP_PATTERN.finditer(text):
         ip = match.group()
-        # Skip common non-routable IPs
-        if ip.startswith("127.") or ip.startswith("0."):
+        # Validate as a real IP address (rejects 999.999.999.999, semver-like strings)
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        # Skip loopback and unspecified
+        if addr.is_loopback or addr.is_unspecified:
             continue
         if ip not in seen:
             seen.add(ip)

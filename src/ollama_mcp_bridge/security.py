@@ -1816,11 +1816,26 @@ class SecurityGateway:
         # 1. Resolve tool
         approved = self._approved_tools.get(tool_call.function_name)
         if not approved:
-            # Try bare name match
-            for tool in self._approved_tools.values():
-                if tool.name == tool_call.tool_name:
-                    approved = tool
-                    break
+            # Try bare name match — reject if ambiguous across servers
+            bare_matches = [
+                t for t in self._approved_tools.values()
+                if t.name == tool_call.tool_name
+            ]
+            if len(bare_matches) == 1:
+                approved = bare_matches[0]
+            elif len(bare_matches) > 1:
+                names = [t.namespaced_name for t in bare_matches]
+                self._audit.log_event(
+                    AuditEventType.TOOL_BLOCKED,
+                    tool=tool_call.function_name,
+                    reason=f"Ambiguous bare name matches: {names}",
+                )
+                raise ToolBlockedError(
+                    f"Tool '{tool_call.function_name}' is ambiguous — matches "
+                    f"tools on multiple servers: {', '.join(names)}. "
+                    f"Use the namespaced name.",
+                    reason="ambiguous_tool_name",
+                )
 
         if not approved:
             self._audit.log_event(

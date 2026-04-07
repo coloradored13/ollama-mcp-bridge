@@ -81,13 +81,31 @@ class AuditLogger:
         """Create audit log directory if it doesn't exist."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Events that must be flushed to disk immediately — losing these
+    # on crash would compromise forensic integrity.
+    _CRITICAL_EVENTS = frozenset({
+        AuditEventType.TOOL_BLOCKED,
+        AuditEventType.TOOL_DENIED,
+        AuditEventType.TOOL_ERROR,
+        AuditEventType.RESULT_QUARANTINED,
+        AuditEventType.TAINTED_SINK_BLOCKED,
+        AuditEventType.TAINTED_SINK_CONFIRMED,
+        AuditEventType.RUG_PULL_DETECTED,
+        AuditEventType.RATE_LIMITED,
+        AuditEventType.SANITIZATION_BLOCK,
+    })
+
     def log(self, entry: AuditEntry) -> None:
-        """Add an audit entry to the buffer and session record."""
+        """Add an audit entry to the buffer and session record.
+
+        Security-critical events flush immediately to disk so they
+        survive a crash. Routine events buffer normally.
+        """
         if not entry.session_id:
             entry.session_id = self._session_id
         self._buffer.append(entry)
         self._session_entries.append(entry)
-        if len(self._buffer) >= self._buffer_limit:
+        if entry.event_type in self._CRITICAL_EVENTS or len(self._buffer) >= self._buffer_limit:
             self.flush()
 
     def log_tool_call(

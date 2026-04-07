@@ -268,9 +268,13 @@ class Bridge:
     ) -> BridgeResult:
         """Synchronous wrapper for run().
 
-        Uses asyncio.run() internally. Raises RuntimeError if called
-        from an existing event loop (Jupyter, async frameworks).
-        Use the async API (bridge.run()) in those contexts.
+        Uses asyncio.run() internally — creates a new event loop including
+        full connect/disconnect lifecycle. For multiple queries, use the
+        async API (bridge.run()) to avoid reconnecting to MCP servers
+        on every call.
+
+        Raises RuntimeError if called from an existing event loop
+        (Jupyter, async frameworks).
         """
         async def _run() -> BridgeResult:
             async with self:

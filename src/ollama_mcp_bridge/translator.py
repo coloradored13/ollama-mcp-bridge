@@ -46,14 +46,22 @@ def _resolve_refs(schema: dict[str, Any]) -> dict[str, Any]:
     defs = schema.get("$defs", schema.get("definitions", {}))
     resolved = copy.deepcopy(schema)
 
+    seen_refs: set[str] = set()
+
     def _walk(node: Any) -> Any:
         if isinstance(node, dict):
             if "$ref" in node:
                 ref_path = node["$ref"]
+                if ref_path in seen_refs:
+                    logger.warning("Circular $ref detected: %s — skipping", ref_path)
+                    return {"type": "object", "description": f"[circular ref: {ref_path}]"}
                 if ref_path.startswith("#/$defs/") or ref_path.startswith("#/definitions/"):
                     ref_name = ref_path.split("/")[-1]
                     if ref_name in defs:
-                        return _walk(copy.deepcopy(defs[ref_name]))
+                        seen_refs.add(ref_path)
+                        resolved_node = _walk(copy.deepcopy(defs[ref_name]))
+                        seen_refs.discard(ref_path)
+                        return resolved_node
                 logger.warning("Cannot resolve $ref: %s — passing through", ref_path)
                 return node
             return {k: _walk(v) for k, v in node.items()}
@@ -137,10 +145,17 @@ class ToolTranslator:
             if tool.namespaced_name == tool_call.function_name:
                 return tool.server, tool.name, tool_call.arguments
 
-        # Try bare name match (model may drop namespace)
-        for tool in approved_tools:
-            if tool.name == tool_call.function_name:
-                return tool.server, tool.name, tool_call.arguments
+        # Try bare name match (model may drop namespace).
+        # If multiple tools share the same bare name across servers,
+        # reject as ambiguous — wrong server could execute.
+        bare_matches = [t for t in approved_tools if t.name == tool_call.function_name]
+        if len(bare_matches) == 1:
+            tool = bare_matches[0]
+            return tool.server, tool.name, tool_call.arguments
+        if len(bare_matches) > 1:
+            # Ambiguous — return None so the caller reports an error
+            # listing available namespaced names.
+            return None
 
         return None
 
