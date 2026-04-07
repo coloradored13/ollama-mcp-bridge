@@ -1,9 +1,11 @@
 """Minimal MCP test server for E2E testing.
 
-Exposes three tools over stdio transport:
+Exposes tools over stdio transport:
   - echo: Returns input text (READ, safe)
   - add: Adds two numbers (READ, safe)
   - get_secret: Returns a fake secret (READ, for testing result handling)
+  - flaky_tool: Fails on certain inputs (for fault injection testing)
+  - slow_tool: Sleeps before responding (for timeout testing)
 
 Run directly: python tests/fixtures/test_mcp_server.py
 The bridge launches this as a subprocess via stdio transport.
@@ -63,6 +65,34 @@ async def list_tools() -> list[Tool]:
                 "required": ["name"],
             },
         ),
+        Tool(
+            name="flaky_tool",
+            description="A tool that fails when input contains 'fail'. Use for testing error handling.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "Input text. If it contains 'fail', the tool will error.",
+                    },
+                },
+                "required": ["input"],
+            },
+        ),
+        Tool(
+            name="slow_tool",
+            description="A tool that takes a while to respond. Use for testing patience.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "seconds": {
+                        "type": "number",
+                        "description": "How many seconds to wait before responding.",
+                    },
+                },
+                "required": ["seconds"],
+            },
+        ),
     ]
 
 
@@ -88,6 +118,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         }
         value = secrets.get(secret_name, f"unknown secret: {secret_name}")
         return [TextContent(type="text", text=value)]
+
+    elif name == "flaky_tool":
+        input_text = arguments.get("input", "")
+        if "fail" in input_text.lower():
+            raise Exception(f"Tool failed on input: {input_text}")
+        return [TextContent(type="text", text=f"flaky_tool succeeded: {input_text}")]
+
+    elif name == "slow_tool":
+        seconds = min(arguments.get("seconds", 1), 30)  # cap at 30s
+        await asyncio.sleep(seconds)
+        return [TextContent(type="text", text=f"slow_tool completed after {seconds}s")]
 
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
+import json
+import urllib.request
 
 import pytest
 
-from ollama_mcp_bridge.config import BridgeConfig, SecurityConfig, ServerConfig
+from ollama_mcp_bridge import Bridge
+from ollama_mcp_bridge.config import (
+    BridgeConfig,
+    LoggingConfig,
+    SecurityConfig,
+    ServerConfig,
+)
 from ollama_mcp_bridge.types import (
     ActionClass,
     ApprovedTool,
@@ -16,50 +21,132 @@ from ollama_mcp_bridge.types import (
     ToolSchema,
 )
 
+from tests.helpers import TEST_MCP_SERVER
 
-# --- Ollama availability detection ---
 
-def _ollama_available() -> bool:
-    """Check if Ollama is running and has at least one model."""
-    try:
-        import urllib.request
-        import json
-        resp = urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3)
-        data = json.loads(resp.read())
-        return len(data.get("models", [])) > 0
-    except Exception:
-        return False
+# --- Ollama model picker ---
 
 
 def _pick_model() -> str:
     """Pick the smallest available Ollama model for fast tests."""
     try:
-        import urllib.request
-        import json
         resp = urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3)
         data = json.loads(resp.read())
         models = data.get("models", [])
         if not models:
             return ""
-        # Prefer smallest model for speed
         models.sort(key=lambda m: m.get("size", float("inf")))
         return models[0]["name"]
     except Exception:
         return ""
 
 
-# Path to the test MCP server
-TEST_MCP_SERVER = str(Path(__file__).parent / "fixtures" / "test_mcp_server.py")
-
-# Python interpreter in the project venv
-TEST_PYTHON = sys.executable
+# --- Live test config builder ---
 
 
-ollama_is_available = _ollama_available()
-requires_ollama = pytest.mark.skipif(
-    not ollama_is_available,
-    reason="Ollama not running or no models available",
-)
+def _make_live_config(
+    tmp_path,
+    auto_approve: bool = False,
+    require_approval: bool = True,
+    allowed_tools: list[str] | None = None,
+    max_turns: int = 3,
+    server_script: str = TEST_MCP_SERVER,
+    server_name: str = "test-tools",
+) -> BridgeConfig:
+    """Build a BridgeConfig pointing at a real MCP server subprocess.
+
+    Each call produces an isolated config with its own registry and audit
+    file under tmp_path, preventing cross-test state leakage.
+    """
+    from tests.helpers import TEST_PYTHON
+
+    return BridgeConfig(
+        ollama_host="http://127.0.0.1:11434",
+        servers={
+            server_name: ServerConfig(
+                command=TEST_PYTHON,
+                args=[server_script],
+                allowed_tools=(
+                    ["echo", "add", "get_secret", "flaky_tool", "slow_tool"]
+                    if allowed_tools is None
+                    else allowed_tools
+                ),
+            ),
+        },
+        security=SecurityConfig(
+            auto_approve_first_seen=auto_approve,
+            require_first_run_approval=require_approval,
+            max_turns=max_turns,
+            max_tool_calls_per_session=20,
+            rate_limit_per_server=10,
+            approval_registry_path=str(tmp_path / "approved_tools.json"),
+        ),
+        logging=LoggingConfig(
+            audit_file=str(tmp_path / "audit.jsonl"),
+        ),
+    )
+
+
+# --- Bridge fixture with subprocess cleanup ---
+
+
+@pytest.fixture
+async def live_bridge(tmp_path):
+    """Yield a Bridge factory with guaranteed subprocess cleanup.
+
+    Usage:
+        async def test_something(live_bridge):
+            bridge = await live_bridge()
+            result = await bridge.run(...)
+
+    The fixture tracks all bridges created and disconnects them after
+    the test, even if the test raises an exception. This kills the MCP
+    server subprocess (close stdin -> SIGTERM -> SIGKILL).
+    """
+    bridges: list[Bridge] = []
+
+    async def _factory(
+        auto_approve: bool = True,
+        require_approval: bool = False,
+        allowed_tools: list[str] | None = None,
+        max_turns: int = 3,
+        server_script: str = TEST_MCP_SERVER,
+        server_name: str = "test-tools",
+        approval_callback=None,
+    ) -> Bridge:
+        config = _make_live_config(
+            tmp_path,
+            auto_approve=auto_approve,
+            require_approval=require_approval,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            server_script=server_script,
+            server_name=server_name,
+        )
+        bridge = Bridge(config)
+        if approval_callback:
+            bridge.set_approval_callback(approval_callback)
+        await bridge._connect()
+        bridges.append(bridge)
+        return bridge
+
+    yield _factory
+
+    # Cleanup: disconnect all bridges, killing MCP subprocesses
+    for bridge in bridges:
+        try:
+            await bridge._disconnect()
+        except Exception:
+            pass
+
+
+@pytest.fixture
+def ollama_model() -> str:
+    """Return the smallest available Ollama model name."""
+    model = _pick_model()
+    if not model:
+        pytest.skip("No Ollama models available")
+    return model
 
 
 @pytest.fixture
