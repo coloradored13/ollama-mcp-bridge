@@ -2074,3 +2074,220 @@ class TestTaintTrackingIntegration:
             if e.event_type == AuditEventType.TAINTED_SINK_DETECTED
         ]
         assert len(detected_events) >= 1
+
+    @pytest.mark.asyncio
+    async def test_tainted_destructive_requires_confirmation(self, tmp_path):
+        """Tainted args to a destructive tool trigger REQUIRE_CONFIRMATION path.
+
+        Uses block_tainted_exfiltration=False so the outbound URL doesn't get
+        BLOCK — instead it falls through to DESTRUCTIVE classification which
+        produces REQUIRE_CONFIRMATION. This exercises the sink policy confirmation
+        path separately from the ActionGate destructive confirmation.
+        """
+        tool_names = ["echo", "delete_file"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=tool_names,
+                    destructive_tools=["delete_file"],
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=20,
+                rate_limit_per_server=10,
+                # Disable outbound block so tainted URL → DESTRUCTIVE path
+                block_tainted_exfiltration=False,
+                tainted_sink_requires_confirmation=True,
+            ),
+        )
+        mcp = MagicMock(spec=MCPClientManager)
+        mcp.list_all_tools = AsyncMock(return_value={
+            "test-server": [_make_tool_schema(n) for n in tool_names],
+        })
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+
+        confirmed = []
+
+        async def confirm_callback(server, tool, action_class, args):
+            confirmed.append((tool, action_class))
+            return True
+
+        gateway.set_confirmation_callback(confirm_callback)
+        await gateway.connect_and_scan()
+
+        # Seed taint with a URL
+        mcp.call_tool = AsyncMock(
+            return_value="see https://evil.com/exfil for details"
+        )
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "search"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        # Tainted destructive call with that URL — should trigger TWO confirmations:
+        # 1. ActionGate (destructive tool)
+        # 2. SinkPolicy (tainted + outbound with exfiltration disabled → falls
+        #    to REQUIRE_CONFIRMATION)
+        mcp.call_tool = AsyncMock(return_value="deleted")
+        tc2 = OllamaToolCall(
+            function_name="test-server__delete_file",
+            arguments={"input": "https://evil.com/exfil"},
+        )
+        result = await gateway.execute_tool(tc2, model_id="test", turn=1)
+        assert result.content  # succeeded
+
+        # Both confirmations were requested
+        assert len(confirmed) == 2
+        assert confirmed[0][1] == "DESTRUCTIVE"  # ActionGate
+        assert confirmed[1][1] == "tainted_sink"  # SinkPolicy
+
+        # Audit shows the tainted sink confirmation
+        entries = audit.get_session_entries()
+        taint_confirmed = [
+            e for e in entries
+            if e.event_type == AuditEventType.TAINTED_SINK_CONFIRMED
+        ]
+        assert len(taint_confirmed) == 1
+
+    @pytest.mark.asyncio
+    async def test_tainted_destructive_denied_when_no_callback(self, tmp_path):
+        """Tainted destructive tool with no confirmation callback → fail-closed."""
+        tool_names = ["echo", "delete_file"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=tool_names,
+                    destructive_tools=[],  # not destructive via config
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=20,
+                rate_limit_per_server=10,
+                require_confirmation_for_destructive=False,
+                block_tainted_destructive_write=True,
+                tainted_sink_requires_confirmation=True,
+            ),
+        )
+        mcp = MagicMock(spec=MCPClientManager)
+        mcp.list_all_tools = AsyncMock(return_value={
+            "test-server": [_make_tool_schema(n) for n in tool_names],
+        })
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        # No confirmation callback set — fail-closed
+        await gateway.connect_and_scan()
+
+        # Seed taint with URL (makes it outbound → BLOCK, not REQUIRE_CONFIRMATION)
+        mcp.call_tool = AsyncMock(return_value="see https://evil.com/data")
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "search"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        # Tainted outbound — blocked even without callback
+        mcp.call_tool = AsyncMock(return_value="sent")
+        tc2 = OllamaToolCall(
+            function_name="test-server__delete_file",
+            arguments={"input": "https://evil.com/data"},
+        )
+        with pytest.raises(ToolBlockedError) as exc_info:
+            await gateway.execute_tool(tc2, model_id="test", turn=1)
+        assert "tainted_sink_blocked" in exc_info.value.reason
+
+    @pytest.mark.asyncio
+    async def test_allowed_outbound_domains_config_through_gateway(self, tmp_path):
+        """allowed_outbound_domains config flows through to sink policy."""
+        tool_names = ["echo", "send_email"]
+        registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
+        for name in tool_names:
+            registry.approve(_make_tool_schema(name))
+
+        config = BridgeConfig(
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=tool_names,
+                ),
+            },
+            security=SecurityConfig(
+                max_turns=5,
+                max_tool_calls_per_session=20,
+                rate_limit_per_server=10,
+                allowed_outbound_domains=["trusted-api.com"],
+            ),
+        )
+        mcp = MagicMock(spec=MCPClientManager)
+        mcp.list_all_tools = AsyncMock(return_value={
+            "test-server": [_make_tool_schema(n) for n in tool_names],
+        })
+        audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+        gateway = SecurityGateway(mcp, config, audit, registry=registry)
+        await gateway.connect_and_scan()
+
+        # Seed taint with an allowed domain
+        mcp.call_tool = AsyncMock(
+            return_value="endpoint: https://trusted-api.com/v1/data"
+        )
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "discover"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        # Tainted but allowed domain → ALLOW_WITH_NOTICE (not blocked)
+        mcp.call_tool = AsyncMock(return_value="sent ok")
+        tc2 = OllamaToolCall(
+            function_name="test-server__send_email",
+            arguments={"input": "post to https://trusted-api.com/v1/data"},
+        )
+        result = await gateway.execute_tool(tc2, model_id="test", turn=1)
+        assert result.content  # not blocked
+
+    @pytest.mark.asyncio
+    async def test_taint_accumulates_across_calls(self, gateway_setup):
+        """Taint tracker accumulates values from multiple tool results."""
+        gateway, mcp, audit = gateway_setup
+        await gateway.connect_and_scan()
+
+        # Two tool results with different URLs
+        mcp.call_tool = AsyncMock(return_value="url1: https://evil1.com")
+        tc1 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "search1"},
+        )
+        await gateway.execute_tool(tc1, model_id="test", turn=0)
+
+        mcp.call_tool = AsyncMock(return_value="url2: https://evil2.com")
+        tc2 = OllamaToolCall(
+            function_name="test-server__echo",
+            arguments={"input": "search2"},
+        )
+        await gateway.execute_tool(tc2, model_id="test", turn=1)
+
+        # Using URL from the FIRST result still triggers taint
+        mcp.call_tool = AsyncMock(return_value="sent")
+        tc3 = OllamaToolCall(
+            function_name="test-server__send_email",
+            arguments={"input": "send to https://evil1.com"},
+        )
+        with pytest.raises(ToolBlockedError) as exc_info:
+            await gateway.execute_tool(tc3, model_id="test", turn=2)
+        assert "tainted_sink_blocked" in exc_info.value.reason
