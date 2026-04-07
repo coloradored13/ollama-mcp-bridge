@@ -116,6 +116,35 @@ SecurityGateway owns the MCP client. There is no code path from model intent to 
 - Result sanitization produces CLEAN, REDACTED, or QUARANTINED tiers. The ANNOTATED tier is defined but not implemented.
 - Audit log rotation is not implemented. The audit file grows indefinitely; rotate manually between sessions.
 
+## Hardening checklist
+
+The bridge architecture is defense-in-depth, but the security level depends on how it's configured. For deployments where a breach has real consequences:
+
+**Required:**
+
+- [ ] `require_first_run_approval = true` (default) — never auto-trust first-seen tools
+- [ ] `auto_approve_first_seen = false` (default) — no silent approval
+- [ ] Every server has an explicit `allowed_tools` list — no empty allowlists on servers you intend to use
+- [ ] Destructive tools are listed in `destructive_tools` — requires human confirmation
+- [ ] Read-only tools are listed in `read_tools` — correct audit classification
+
+**Strongly recommended:**
+
+- [ ] `allowed_outbound_domains` populated — blocks URLs not on the list
+- [ ] `allowed_path_roots` populated — constrains file access to specific directories
+- [ ] `approved_recipients` populated — blocks unknown email recipients
+- [ ] Adversarial test suite passes against your MCP servers, not just the test fixtures
+- [ ] Audit log reviewed after first real session — verify the pipeline is logging what you expect
+
+**Operational:**
+
+- [ ] Rotate audit log between sessions (not automated)
+- [ ] Review `bridge.toml` after adding new MCP servers — new tools need classification
+- [ ] Run `pytest tests/test_adversarial.py` as part of release discipline, not one-time proof
+- [ ] Monitor for MCP server restarts — bridge doesn't re-scan tool definitions automatically
+
+Without this posture, the bridge is well-built but too configurable to be called maximally safe. With it, the remaining risk is "the MCP server itself is malicious" — which is outside the bridge's threat model.
+
 ## License
 
 Apache 2.0
