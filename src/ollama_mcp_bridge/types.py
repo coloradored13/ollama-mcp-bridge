@@ -278,7 +278,7 @@ class ValidationResult(BaseModel):
     """Result of parameter validation (SAD[3])."""
 
     valid: bool
-    sanitized_params: dict[str, Any] = Field(default_factory=dict)
+    validated_params: dict[str, Any] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
 
 

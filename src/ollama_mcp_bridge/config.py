@@ -44,6 +44,7 @@ class ServerConfig(BaseModel):
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] | None = None
     allowed_tools: list[str] = Field(default_factory=list)
+    read_tools: list[str] = Field(default_factory=list)
     destructive_tools: list[str] = Field(default_factory=list)
     max_calls_per_minute: int = 30
     max_result_bytes: int = 65536
@@ -130,7 +131,8 @@ class LoggingConfig(BaseModel):
 
     audit_file: str = "~/.ollama-mcp-bridge/audit.jsonl"
     level: str = "INFO"
-    rotation_days: int = 30
+    # rotation_days: not implemented — audit file grows indefinitely.
+    # Manual rotation: move/truncate the audit file between sessions.
 
 
 class BridgeConfig(BaseModel):
@@ -146,7 +148,13 @@ class BridgeConfig(BaseModel):
     @field_validator("ollama_host")
     @classmethod
     def ollama_host_must_be_localhost(cls, v: str) -> str:
-        # SR-10: default localhost only. Allow override but warn.
+        """Warn if ollama_host is not localhost — remote Ollama exposes model API."""
+        if v and "127.0.0.1" not in v and "localhost" not in v:
+            logger.warning(
+                "ollama_host '%s' is not localhost — the Ollama API will be "
+                "accessed over the network. Ensure this is intentional.",
+                v,
+            )
         return v
 
     @field_validator("servers")
@@ -190,8 +198,12 @@ class BridgeConfig(BaseModel):
     def get_tool_classification(self, server: str, tool: str) -> ActionClass:
         """Get the action classification for a specific tool."""
         server_config = self.servers.get(server)
-        if server_config and tool in server_config.destructive_tools:
+        if not server_config:
+            return ActionClass.WRITE
+        if tool in server_config.destructive_tools:
             return ActionClass.DESTRUCTIVE
+        if tool in server_config.read_tools:
+            return ActionClass.READ
         return ActionClass.WRITE
 
     def is_tool_allowed(self, server: str, tool: str) -> bool:

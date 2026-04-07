@@ -41,6 +41,7 @@ require_first_run_approval = true
 command = "python"
 args = ["-m", "sigma_mem.mcp_server"]
 allowed_tools = ["store_memory", "recall", "search_memory", "get_meta"]
+read_tools = ["recall", "search_memory", "get_meta"]
 destructive_tools = []
 
 # [servers.files]
@@ -52,4 +53,4 @@ destructive_tools = []
 [logging]
 audit_file = "~/.ollama-mcp-bridge/audit.jsonl"
 level = "INFO"
-rotation_days = 30
+# rotation_days: not implemented — rotate manually between sessions

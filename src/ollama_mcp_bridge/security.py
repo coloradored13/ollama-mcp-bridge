@@ -471,7 +471,7 @@ class ParameterValidator:
         Layer 2: Type-specific security checks
         """
         errors: list[str] = []
-        sanitized = dict(params)
+        validated = dict(params)
 
         # L1: JSON Schema validation
         schema = tool.input_schema
@@ -483,7 +483,7 @@ class ParameterValidator:
                 errors.append(
                     "Tool schema defines no properties but parameters were provided"
                 )
-                return ValidationResult(valid=False, sanitized_params=sanitized, errors=errors)
+                return ValidationResult(valid=False, validated_params=validated, errors=errors)
 
             # SEC-5: Inject additionalProperties:false before validation.
             # This prevents models from passing unexpected extra fields that the tool
@@ -498,7 +498,7 @@ class ParameterValidator:
                 jsonschema.validate(instance=params, schema=strict_schema)
             except jsonschema.ValidationError as e:
                 errors.append(f"Schema validation: {e.message}")
-                return ValidationResult(valid=False, sanitized_params=sanitized, errors=errors)
+                return ValidationResult(valid=False, validated_params=validated, errors=errors)
 
         # L2: Type-specific security checks on declared properties, then
         # recursive scan of all values for string-level threats.
@@ -517,7 +517,7 @@ class ParameterValidator:
 
         return ValidationResult(
             valid=len(errors) == 0,
-            sanitized_params=sanitized,
+            validated_params=validated,
             errors=errors,
         )
 
@@ -539,8 +539,8 @@ class ParameterValidator:
         elif param_type == "object" and isinstance(value, dict):
             # Depth check for nested objects
             depth = self._measure_depth(value)
-            if depth > 5:
-                errors.append(f"Parameter '{name}': nesting depth {depth} exceeds maximum (5)")
+            if depth > self.MAX_NESTING_DEPTH:
+                errors.append(f"Parameter '{name}': nesting depth {depth} exceeds maximum ({self.MAX_NESTING_DEPTH})")
 
         elif param_type == "array" and isinstance(value, list):
             if len(value) > 1000:
@@ -561,6 +561,9 @@ class ParameterValidator:
             errors.append(f"Parameter '{name}': contains path traversal pattern")
         return errors
 
+    # Maximum nesting depth for both schema check and deep scan.
+    MAX_NESTING_DEPTH = 5
+
     def _deep_scan_values(
         self, obj: Any, path: str = "$", depth: int = 0
     ) -> list[str]:
@@ -568,10 +571,11 @@ class ParameterValidator:
 
         This catches dangerous strings buried inside nested dicts and arrays
         that the schema-driven L2 checks miss (since L2 only iterates
-        top-level declared properties).
+        top-level declared properties). Uses the same depth limit as the
+        schema-level nesting check.
         """
-        if depth > 10:
-            return []
+        if depth > self.MAX_NESTING_DEPTH:
+            return [f"{path}: nesting depth exceeds maximum ({self.MAX_NESTING_DEPTH})"]
         errors: list[str] = []
         if isinstance(obj, dict):
             for key, value in obj.items():
@@ -662,9 +666,11 @@ class ResultSanitizer:
 
         Returns (sanitized_content, tier).
         """
-        # Size gate
+        # Size gate — truncate by bytes, not characters, to respect the
+        # configured limit for multi-byte UTF-8 content. Decode with
+        # errors='ignore' to avoid slicing mid-codepoint.
         if len(content.encode()) > self._max_bytes:
-            content = content[: self._max_bytes]
+            content = content.encode()[: self._max_bytes].decode("utf-8", errors="ignore")
             content += f"\n[TRUNCATED — result exceeded {self._max_bytes} bytes]"
 
         # Check for role impersonation
@@ -922,11 +928,18 @@ class ToolApprovalRegistry:
             self._save()
 
     def _save(self) -> None:
-        """Persist registry to disk in structured format."""
+        """Persist registry to disk atomically.
+
+        Write to a temp file then rename — atomic on POSIX. If the process
+        dies mid-write, the original registry file is untouched.
+        """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = {key: entry.model_dump(mode="json") for key, entry in self._entries.items()}
-        with open(self._path, "w") as f:
+        tmp_path = self._path.with_suffix(".tmp")
+        with open(tmp_path, "w") as f:
             json.dump(data, f, indent=2)
+            f.flush()
+        tmp_path.replace(self._path)
 
     def _key(self, server: str, tool: str) -> str:
         return f"{server}:{tool}"
@@ -1992,7 +2005,7 @@ class SecurityGateway:
             raw_result = await self._mcp.call_tool(
                 approved.server,
                 approved.name,
-                validation.sanitized_params,
+                validation.validated_params,
             )
         except MCPToolError as e:
             self._audit.log_event(
