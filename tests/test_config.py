@@ -343,3 +343,128 @@ allowed_outbound_domains = ["global.com"]
     def test_require_destination_policy_default_false(self):
         cfg = SecurityConfig()
         assert cfg.require_destination_policy_for_outbound is False
+
+
+# --- PathPolicy config tests ---
+
+
+class TestPathPolicyConfig:
+    def test_parse_path_policy_from_toml(self, tmp_path: Path):
+        """[paths.server.tool] TOML sections parse correctly."""
+        toml_content = """\
+[servers.files]
+command = "echo"
+allowed_tools = ["read_file"]
+
+[paths.files.read_file]
+allowed_roots = ["/tmp/sandbox", "~/safe"]
+allow_relative_paths = false
+normalize_symlinks = true
+extensions_allowlist = [".txt", ".md"]
+"""
+        config_file = tmp_path / "paths.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_path_policy("files", "read_file")
+        assert policy is not None
+        assert policy.allowed_roots == ["/tmp/sandbox", "~/safe"]
+        assert policy.allow_relative_paths is False
+        assert policy.normalize_symlinks is True
+        assert policy.extensions_allowlist == [".txt", ".md"]
+
+    def test_path_policy_read_only(self, tmp_path: Path):
+        toml_content = """\
+[servers.files]
+command = "echo"
+allowed_tools = ["read_file"]
+
+[paths.files.read_file]
+allowed_roots = ["/data"]
+read_only = true
+"""
+        config_file = tmp_path / "readonly.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_path_policy("files", "read_file")
+        assert policy is not None
+        assert policy.read_only is True
+
+    def test_allowed_path_roots_auto_converts(self, tmp_path: Path):
+        """allowed_path_roots produces global path policy."""
+        toml_content = """\
+[security]
+allowed_path_roots = ["/tmp/sandbox", "/home/user/safe"]
+"""
+        config_file = tmp_path / "compat.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_path_policy("any-server", "any-tool")
+        assert policy is not None
+        assert policy.allowed_roots == ["/tmp/sandbox", "/home/user/safe"]
+        assert policy.allow_relative_paths is False
+        assert policy.normalize_symlinks is True
+
+    def test_get_path_policy_tool_specific(self, tmp_path: Path):
+        """Tool-specific path policy takes precedence."""
+        toml_content = """\
+[servers.files]
+command = "echo"
+allowed_tools = ["write_file"]
+
+[paths.files.write_file]
+allowed_roots = ["/specific"]
+
+[security]
+allowed_path_roots = ["/global"]
+"""
+        config_file = tmp_path / "specific.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_path_policy("files", "write_file")
+        assert policy is not None
+        assert policy.allowed_roots == ["/specific"]
+
+    def test_get_path_policy_server_wide_fallback(self, tmp_path: Path):
+        """Server-wide _all policy used when no tool-specific policy."""
+        toml_content = """\
+[servers.files]
+command = "echo"
+allowed_tools = ["read_file", "write_file"]
+
+[paths.files._all]
+allowed_roots = ["/server-wide"]
+"""
+        config_file = tmp_path / "serverwide.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_path_policy("files", "read_file")
+        assert policy is not None
+        assert policy.allowed_roots == ["/server-wide"]
+
+    def test_get_path_policy_no_config(self):
+        """No path config returns None."""
+        cfg = BridgeConfig()
+        assert cfg.get_path_policy("server", "tool") is None
+
+    def test_path_policy_delete_allowed(self, tmp_path: Path):
+        toml_content = """\
+[servers.files]
+command = "echo"
+allowed_tools = ["delete_file"]
+
+[paths.files.delete_file]
+allowed_roots = ["/tmp/trash"]
+delete_allowed = true
+"""
+        config_file = tmp_path / "delete.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_path_policy("files", "delete_file")
+        assert policy is not None
+        assert policy.delete_allowed is True

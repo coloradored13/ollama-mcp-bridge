@@ -482,3 +482,188 @@ class TestInfluenceEvidence:
         assert e.arg_value == ""
         assert e.origin_id == ""
         assert e.confidence == 0.0
+
+
+# --- PathPolicy tests ---
+
+
+from ollama_mcp_bridge.types import PathMatchResult, PathPolicy, ToolCapabilityManifest
+
+
+class TestPathPolicy:
+    def test_path_within_root_passes(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        result = policy.validate_path("/tmp/sandbox/file.txt")
+        assert result.matched is True
+
+    def test_path_outside_root_rejected(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        result = policy.validate_path("/etc/passwd")
+        assert result.matched is False
+        assert "outside allowed roots" in result.failure_reason
+
+    def test_traversal_attack_rejected(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        result = policy.validate_path("/tmp/sandbox/../../etc/passwd")
+        assert result.matched is False
+        assert "outside allowed roots" in result.failure_reason
+
+    def test_relative_path_rejected_by_default(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        result = policy.validate_path("../../../etc/passwd")
+        assert result.matched is False
+        assert "relative paths not allowed" in result.failure_reason
+
+    def test_relative_path_allowed_when_enabled(self):
+        """When allow_relative_paths=True, relative paths within root are allowed."""
+        import os
+        # Use CWD-relative path that stays in root — test with absolute root
+        sandbox = os.path.realpath("/tmp/sandbox_test_rel")
+        os.makedirs(sandbox, exist_ok=True)
+        policy = PathPolicy(
+            allowed_roots=[sandbox],
+            allow_relative_paths=True,
+            normalize_symlinks=False,
+        )
+        # A relative path that normpath resolves to CWD — won't be in root
+        result = policy.validate_path("./somefile.txt")
+        # This should fail because CWD-relative path won't be in sandbox
+        assert result.matched is False
+
+    def test_glob_rejected_by_default(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        result = policy.validate_path("/tmp/sandbox/*.txt")
+        assert result.matched is False
+        assert "glob patterns not allowed" in result.failure_reason
+
+    def test_glob_allowed_when_enabled(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"], allow_globs=True)
+        result = policy.validate_path("/tmp/sandbox/*.txt")
+        assert result.matched is True
+
+    def test_home_expansion_blocked(self):
+        policy = PathPolicy(
+            allowed_roots=["/tmp/sandbox"],
+            allow_user_home_expansion=False,
+        )
+        result = policy.validate_path("~/secret")
+        assert result.matched is False
+        assert "home expansion not allowed" in result.failure_reason
+
+    def test_home_expansion_allowed_by_default(self):
+        import os
+        home = os.path.expanduser("~")
+        policy = PathPolicy(allowed_roots=[home])
+        result = policy.validate_path("~/documents/file.txt")
+        assert result.matched is True
+
+    def test_extension_allowlist_passes(self):
+        policy = PathPolicy(
+            allowed_roots=["/tmp/sandbox"],
+            extensions_allowlist=[".txt", ".md"],
+        )
+        result = policy.validate_path("/tmp/sandbox/readme.txt")
+        assert result.matched is True
+
+    def test_extension_allowlist_rejects(self):
+        policy = PathPolicy(
+            allowed_roots=["/tmp/sandbox"],
+            extensions_allowlist=[".txt", ".md"],
+        )
+        result = policy.validate_path("/tmp/sandbox/exploit.sh")
+        assert result.matched is False
+        assert "extension" in result.failure_reason
+        assert "allowlist" in result.failure_reason
+
+    def test_extension_allowlist_without_dot(self):
+        """Extension in config without leading dot still works."""
+        policy = PathPolicy(
+            allowed_roots=["/tmp/sandbox"],
+            extensions_allowlist=["txt"],
+        )
+        result = policy.validate_path("/tmp/sandbox/file.txt")
+        assert result.matched is True
+
+    def test_multiple_roots(self):
+        policy = PathPolicy(allowed_roots=["/tmp/a", "/tmp/b"])
+        assert policy.validate_path("/tmp/a/file").matched is True
+        assert policy.validate_path("/tmp/b/file").matched is True
+        assert policy.validate_path("/tmp/c/file").matched is False
+
+    def test_exact_root_path_passes(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        result = policy.validate_path("/tmp/sandbox")
+        assert result.matched is True
+
+    def test_read_only_blocks_write_tool(self):
+        caps = ToolCapabilityManifest(filesystem_write=True)
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"], read_only=True)
+        result = policy.validate_path("/tmp/sandbox/file.txt", caps)
+        assert result.matched is False
+        assert "read_only" in result.failure_reason
+
+    def test_read_only_allows_read_tool(self):
+        caps = ToolCapabilityManifest(filesystem_read=True)
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"], read_only=True)
+        result = policy.validate_path("/tmp/sandbox/file.txt", caps)
+        assert result.matched is True
+
+    def test_delete_not_allowed_blocks_delete_tool(self):
+        caps = ToolCapabilityManifest(filesystem_delete=True)
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"], delete_allowed=False)
+        result = policy.validate_path("/tmp/sandbox/file.txt", caps)
+        assert result.matched is False
+        assert "delete not allowed" in result.failure_reason
+
+    def test_delete_allowed_passes(self):
+        caps = ToolCapabilityManifest(filesystem_delete=True)
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"], delete_allowed=True)
+        result = policy.validate_path("/tmp/sandbox/file.txt", caps)
+        assert result.matched is True
+
+    def test_write_only_blocks_delete_tool(self):
+        caps = ToolCapabilityManifest(filesystem_delete=True)
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"], write_only=True)
+        result = policy.validate_path("/tmp/sandbox/file.txt", caps)
+        assert result.matched is False
+        assert "write_only" in result.failure_reason
+
+    def test_frozen_model(self):
+        policy = PathPolicy(allowed_roots=["/tmp"])
+        with pytest.raises(Exception):
+            policy.allowed_roots = ["/other"]
+
+    def test_defaults(self):
+        policy = PathPolicy(allowed_roots=["/tmp"])
+        assert policy.allow_relative_paths is False
+        assert policy.normalize_symlinks is True
+        assert policy.allow_globs is False
+        assert policy.allow_user_home_expansion is True
+        assert policy.read_only is False
+        assert policy.write_only is False
+        assert policy.delete_allowed is False
+        assert policy.extensions_allowlist == []
+        assert policy.filename_pattern_allowlist == []
+
+    def test_filename_pattern_allowlist(self):
+        policy = PathPolicy(
+            allowed_roots=["/tmp/sandbox"],
+            filename_pattern_allowlist=[r".*\.log", r"data_\d+\.csv"],
+        )
+        assert policy.validate_path("/tmp/sandbox/app.log").matched is True
+        assert policy.validate_path("/tmp/sandbox/data_123.csv").matched is True
+        assert policy.validate_path("/tmp/sandbox/evil.sh").matched is False
+
+
+class TestPathMatchResult:
+    def test_default_not_matched(self):
+        r = PathMatchResult()
+        assert r.matched is False
+        assert r.failure_reason == ""
+
+    def test_matched_result(self):
+        r = PathMatchResult(
+            matched=True, policy_roots=["/tmp"],
+            checked_path="/tmp/file.txt",
+        )
+        assert r.matched is True

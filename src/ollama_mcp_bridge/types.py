@@ -266,6 +266,173 @@ class ToolCapabilityManifest(BaseModel):
         return flags
 
 
+class PathPolicy(BaseModel):
+    """Typed path constraint for filesystem tool calls.
+
+    Replaces coarse allowed_path_roots with rich, per-tool validation:
+    allowed roots, relative path control, symlink resolution, extension
+    filtering, and read/write/delete granularity.
+
+    Configured per server+tool via [paths.<server>.<tool>] TOML sections.
+    A path is allowed only if it satisfies ALL active constraints.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    allowed_roots: list[str]  # required — directories the tool may access
+    allow_relative_paths: bool = False  # False = relative paths rejected outright
+    normalize_symlinks: bool = True  # True = resolve symlinks before root check
+    allow_globs: bool = False  # True = allow glob patterns (*, ?) in paths
+    allow_user_home_expansion: bool = True  # True = expand ~ before validation
+    read_only: bool = False  # True = tool can only read, not write/delete
+    write_only: bool = False  # True = tool can only write (no delete)
+    delete_allowed: bool = False  # True = tool may delete files
+    extensions_allowlist: list[str] = Field(default_factory=list)  # empty = any extension
+    filename_pattern_allowlist: list[str] = Field(default_factory=list)  # empty = any filename
+
+    def validate_path(self, raw_path: str, tool_capabilities: "ToolCapabilityManifest | None" = None) -> "PathMatchResult":
+        """Check whether a path satisfies all constraints in this policy.
+
+        Validates: relative path control, root containment, symlink escape,
+        extension allowlist, and read/write/delete constraints.
+        """
+        import os
+        import re
+
+        base = PathMatchResult(policy_roots=self.allowed_roots, checked_path=raw_path[:200])
+
+        # 1. Relative path check
+        is_relative = not raw_path.startswith(("/", "~"))
+        if is_relative and not self.allow_relative_paths:
+            return PathMatchResult(
+                policy_roots=self.allowed_roots,
+                checked_path=raw_path[:200],
+                failure_reason="relative paths not allowed (allow_relative_paths=False)",
+            )
+
+        # 2. Glob check
+        if not self.allow_globs and any(c in raw_path for c in ("*", "?")):
+            return PathMatchResult(
+                policy_roots=self.allowed_roots,
+                checked_path=raw_path[:200],
+                failure_reason="glob patterns not allowed (allow_globs=False)",
+            )
+
+        # 3. Normalize path
+        if self.allow_user_home_expansion:
+            expanded = os.path.expanduser(raw_path)
+        else:
+            if raw_path.startswith("~"):
+                return PathMatchResult(
+                    policy_roots=self.allowed_roots,
+                    checked_path=raw_path[:200],
+                    failure_reason="home expansion not allowed (allow_user_home_expansion=False)",
+                )
+            expanded = raw_path
+
+        normalized = os.path.normpath(expanded)
+
+        # 4. Symlink resolution
+        if self.normalize_symlinks:
+            try:
+                resolved = os.path.realpath(normalized)
+            except OSError:
+                resolved = normalized
+        else:
+            resolved = normalized
+
+        # 5. Root containment check — roots must be resolved the same way as paths
+        def _normalize_root(r: str) -> str:
+            expanded = os.path.expanduser(r) if self.allow_user_home_expansion else r
+            normed = os.path.normpath(expanded)
+            if self.normalize_symlinks:
+                try:
+                    return os.path.realpath(normed)
+                except OSError:
+                    return normed
+            return normed
+
+        normalized_roots = [_normalize_root(r) for r in self.allowed_roots]
+
+        in_root = any(
+            resolved == root or resolved.startswith(root + os.sep)
+            for root in normalized_roots
+        )
+        if not in_root:
+            return PathMatchResult(
+                policy_roots=self.allowed_roots,
+                checked_path=raw_path[:200],
+                failure_reason=(
+                    f"path '{resolved}' is outside allowed roots "
+                    f"({', '.join(self.allowed_roots)})"
+                ),
+            )
+
+        # 6. Extension allowlist
+        if self.extensions_allowlist:
+            _, ext = os.path.splitext(resolved)
+            ext_lower = ext.lower()
+            allowed_exts = {e.lower() if e.startswith(".") else f".{e.lower()}" for e in self.extensions_allowlist}
+            if ext_lower not in allowed_exts:
+                return PathMatchResult(
+                    policy_roots=self.allowed_roots,
+                    checked_path=raw_path[:200],
+                    failure_reason=(
+                        f"extension '{ext}' not in allowlist "
+                        f"({', '.join(self.extensions_allowlist)})"
+                    ),
+                )
+
+        # 7. Filename pattern allowlist
+        if self.filename_pattern_allowlist:
+            filename = os.path.basename(resolved)
+            if not any(re.match(pattern, filename) for pattern in self.filename_pattern_allowlist):
+                return PathMatchResult(
+                    policy_roots=self.allowed_roots,
+                    checked_path=raw_path[:200],
+                    failure_reason=(
+                        f"filename '{filename}' does not match any allowed pattern "
+                        f"({', '.join(self.filename_pattern_allowlist)})"
+                    ),
+                )
+
+        # 8. Read/write/delete capability checks
+        if tool_capabilities:
+            if self.read_only and (tool_capabilities.filesystem_write or tool_capabilities.filesystem_delete):
+                return PathMatchResult(
+                    policy_roots=self.allowed_roots,
+                    checked_path=raw_path[:200],
+                    failure_reason="path policy is read_only but tool has write/delete capability",
+                )
+            if self.write_only and tool_capabilities.filesystem_delete:
+                return PathMatchResult(
+                    policy_roots=self.allowed_roots,
+                    checked_path=raw_path[:200],
+                    failure_reason="path policy is write_only but tool has delete capability",
+                )
+            if not self.delete_allowed and tool_capabilities.filesystem_delete:
+                return PathMatchResult(
+                    policy_roots=self.allowed_roots,
+                    checked_path=raw_path[:200],
+                    failure_reason="delete not allowed by path policy but tool has delete capability",
+                )
+
+        return PathMatchResult(
+            matched=True,
+            policy_roots=self.allowed_roots,
+            checked_path=raw_path[:200],
+        )
+
+
+class PathMatchResult(BaseModel):
+    """Result of matching a path against a PathPolicy."""
+
+    matched: bool = False
+    policy_roots: list[str] = Field(default_factory=list)
+    checked_path: str = ""
+    failure_reason: str = ""  # empty if matched
+
+
 class DestinationMatchResult(BaseModel):
     """Result of matching a URL against a DestinationPolicy."""
 
