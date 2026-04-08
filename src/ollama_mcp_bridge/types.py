@@ -1075,6 +1075,15 @@ class AuditEntry(BaseModel):
     approval_mode: str = ""  # ApprovalMode value for approval events
     definition_hash: str = ""  # tool definition hash for approval/integrity events
     confirmation_outcome: str = ""  # ConfirmationOutcome value for gate events
+    # Forensic enrichment fields (PR 18)
+    capability_manifest: dict[str, Any] = Field(default_factory=dict)  # compact capability flags
+    sink_type: str = ""  # SinkType classification used for decision
+    destination_match: str = ""  # destination policy match result summary
+    adapter_decisions: list[str] = Field(default_factory=list)  # per-adapter pass/fail
+    taint_summary: str = ""  # taint/influence evidence summary
+    deployment_mode: str = ""  # DeploymentMode at time of event
+    security_profile: str = ""  # SecurityProfile at time of event
+    decision_basis: str = ""  # "explicit_policy" or "generic_default" or "profile_requirement"
 
 
 # --- Consumer-facing types ---

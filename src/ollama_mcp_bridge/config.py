@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import tomllib
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,48 @@ from .errors import ConfigError
 from .types import ActionClass, CapabilitySource, DestinationPolicy, PathPolicy, RecipientPolicy, ToolCapabilityManifest
 
 logger = logging.getLogger(__name__)
+
+
+class SecurityProfile(str, Enum):
+    """Security profile controlling baseline enforcement behavior.
+
+    COMPAT: Backward-compatible defaults. No additional enforcement beyond
+        what was configured explicitly. Useful for migration from pre-profile configs.
+    STANDARD: Current defaults. All security features available but opt-in.
+        Suitable for development and trusted-server deployments.
+    HARDENED: Proactive security enforcement. First-run approval required,
+        auto-approve forbidden, adapters auto-activate for capable tools.
+        Suitable for production deployments with untrusted tools.
+    HIGH_CONSEQUENCE: Maximum enforcement. Explicit capability manifest required
+        for dangerous tools, destination/path/recipient policies required for
+        capable tools. Inferred-only manifests blocked for dangerous tools.
+        Suitable for high-stakes deployments where a single miss is bad.
+
+    Profile is a config field, not a runtime toggle. Changing profile requires restart.
+    """
+
+    COMPAT = "compat"
+    STANDARD = "standard"
+    HARDENED = "hardened"
+    HIGH_CONSEQUENCE = "high_consequence"
+
+
+class DeploymentMode(str, Enum):
+    """Deployment environment declaration.
+
+    The bridge cannot prove the OS is sandboxed, but it can require the
+    operator to declare the mode and make that declaration visible in
+    logs and audit headers.
+
+    LOCAL_DEV: Development machine. Minimal deployment checks.
+    SANDBOXED: Sandboxed environment (container, VM, restricted user).
+    HIGH_CONSEQUENCE: High-stakes deployment. Startup fails if required
+        deployment assertions are not set.
+    """
+
+    LOCAL_DEV = "local_dev"
+    SANDBOXED = "sandboxed"
+    HIGH_CONSEQUENCE = "high_consequence"
 
 
 class ServerConfig(BaseModel):
@@ -105,6 +148,13 @@ class SecurityConfig(BaseModel):
     # Capability narrowing — safe adapters (opt-in, empty = disabled)
     allowed_path_roots: list[str] = Field(default_factory=list)
     approved_recipients: list[str] = Field(default_factory=list)
+    # Security profile — controls baseline enforcement behavior (PR 16)
+    security_profile: SecurityProfile = SecurityProfile.STANDARD
+    # Deployment guardrails (PR 17)
+    deployment_mode: DeploymentMode = DeploymentMode.LOCAL_DEV
+    require_network_egress_controls: bool = False
+    require_filesystem_sandbox: bool = False
+    require_secret_scoping: bool = False
 
     @model_validator(mode="after")
     def max_turns_within_hard_cap(self) -> "SecurityConfig":
@@ -122,6 +172,33 @@ class SecurityConfig(BaseModel):
                 "auto_approve_first_seen=True overrides require_first_run_approval — "
                 "all first-seen tools will be auto-approved."
             )
+        return self
+
+    @model_validator(mode="after")
+    def enforce_profile_requirements(self) -> "SecurityConfig":
+        """Enforce security profile constraints on config values."""
+        if self.security_profile == SecurityProfile.HARDENED:
+            if not self.require_first_run_approval:
+                raise ValueError(
+                    "security_profile='hardened' requires "
+                    "require_first_run_approval=True"
+                )
+            if self.auto_approve_first_seen:
+                raise ValueError(
+                    "security_profile='hardened' forbids "
+                    "auto_approve_first_seen=True"
+                )
+        elif self.security_profile == SecurityProfile.HIGH_CONSEQUENCE:
+            if not self.require_first_run_approval:
+                raise ValueError(
+                    "security_profile='high_consequence' requires "
+                    "require_first_run_approval=True"
+                )
+            if self.auto_approve_first_seen:
+                raise ValueError(
+                    "security_profile='high_consequence' forbids "
+                    "auto_approve_first_seen=True"
+                )
         return self
 
 

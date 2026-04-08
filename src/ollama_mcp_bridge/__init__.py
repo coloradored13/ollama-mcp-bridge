@@ -12,7 +12,7 @@ Public API:
 """
 
 from .bridge import Bridge
-from .config import BridgeConfig, SecurityConfig, ServerConfig, load_config
+from .config import BridgeConfig, DeploymentMode, SecurityConfig, SecurityProfile, ServerConfig, load_config
 from .errors import (
     BridgeError,
     ConfigError,
@@ -75,7 +75,9 @@ __all__ = [
     "Bridge",
     # Config
     "BridgeConfig",
+    "DeploymentMode",
     "SecurityConfig",
+    "SecurityProfile",
     "ServerConfig",
     "load_config",
     # Results
