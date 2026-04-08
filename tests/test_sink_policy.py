@@ -4,6 +4,7 @@ import pytest
 
 from ollama_mcp_bridge.config import SecurityConfig
 from ollama_mcp_bridge.sink_policy import (
+    ExtractedValue,
     SinkPolicyEngine,
     SinkType,
     TaintTracker,
@@ -12,11 +13,14 @@ from ollama_mcp_bridge.sink_policy import (
     _is_memory_write_tool,
     _args_contain_outbound_indicators,
     _args_contain_destination_fields,
+    _derived_match_confidence,
 )
 from ollama_mcp_bridge.types import (
     ActionClass,
     ApprovedTool,
     ContentProvenance,
+    InfluenceState,
+    InfluenceType,
     SemanticRiskAssessment,
     SinkDecision,
     SourceType,
@@ -810,3 +814,157 @@ class TestDestinationPolicySinkPolicy:
             destination_policies=policies,
         )
         assert result == SinkDecision.ALLOW
+
+
+# --- PR 13: Derived taint / InfluenceState tests ---
+
+
+class TestDerivedMatchConfidence:
+    """Tests for _derived_match_confidence — non-exact taint relationships."""
+
+    def test_same_host_different_path(self):
+        """URL reuse: same host, different path → 0.6."""
+        arg = ExtractedValue(value="https://evil.com/api/v2", kind="url")
+        tracked = ExtractedValue(value="https://evil.com/api/v1", kind="url")
+        conf, itype = _derived_match_confidence(arg, tracked)
+        assert conf == 0.6
+        assert itype == InfluenceType.DERIVED_URL_REUSE
+
+    def test_protocol_change(self):
+        """Protocol swap: https→http on same host → 0.65."""
+        arg = ExtractedValue(value="http://evil.com/api", kind="url")
+        tracked = ExtractedValue(value="https://evil.com/api", kind="url")
+        conf, itype = _derived_match_confidence(arg, tracked)
+        assert conf == 0.65
+        assert itype == InfluenceType.DERIVED_PROTOCOL_CHANGE
+
+    def test_email_domain_reuse(self):
+        """Different local part, same domain → 0.5."""
+        arg = ExtractedValue(value="admin@evil.com", kind="email")
+        tracked = ExtractedValue(value="user@evil.com", kind="email")
+        conf, itype = _derived_match_confidence(arg, tracked)
+        assert conf == 0.5
+        assert itype == InfluenceType.DERIVED_EMAIL_DOMAIN
+
+    def test_ip_in_host_port(self):
+        """Tracked IP appears in host:port arg → 0.8."""
+        arg = ExtractedValue(value="10.0.0.1:8080", kind="host_port")
+        tracked = ExtractedValue(value="10.0.0.1", kind="ip")
+        conf, itype = _derived_match_confidence(arg, tracked)
+        assert conf == 0.8
+        assert itype == InfluenceType.DERIVED_HOSTNAME_IN_URL
+
+    def test_hostname_in_host_port(self):
+        """Tracked hostname in host:port arg → 0.7."""
+        arg = ExtractedValue(value="evil.com:443", kind="host_port")
+        tracked = ExtractedValue(value="evil.com", kind="domain")
+        conf, itype = _derived_match_confidence(arg, tracked)
+        assert conf == 0.7
+        assert itype == InfluenceType.DERIVED_HOSTNAME_IN_URL
+
+    def test_hostname_cross_kind(self):
+        """Hostname matches domain → 0.75."""
+        arg = ExtractedValue(value="evil.com", kind="hostname")
+        tracked = ExtractedValue(value="evil.com", kind="domain")
+        conf, itype = _derived_match_confidence(arg, tracked)
+        assert conf == 0.75
+        assert itype == InfluenceType.DIRECT_VALUE_MATCH
+
+    def test_no_derived_match(self):
+        """Completely different values → 0.0."""
+        arg = ExtractedValue(value="https://safe.com/api", kind="url")
+        tracked = ExtractedValue(value="https://evil.com/exfil", kind="url")
+        conf, itype = _derived_match_confidence(arg, tracked)
+        assert conf == 0.0
+        assert itype is None
+
+    def test_same_email_exact_not_derived(self):
+        """Exact same email → handled by _match_confidence, not derived."""
+        arg = ExtractedValue(value="user@evil.com", kind="email")
+        tracked = ExtractedValue(value="user@evil.com", kind="email")
+        # _derived_match_confidence should still catch it via domain reuse
+        conf, itype = _derived_match_confidence(arg, tracked)
+        assert conf == 0.5  # domain matches even though full email also matches
+
+
+class TestComputeTaintInfluenceState:
+    """Tests that compute_taint returns InfluenceState with evidence."""
+
+    def test_returns_influence_state(self):
+        tracker = TaintTracker()
+        tracker.record_result(
+            content="Found at https://evil.com/api/v1",
+            origin_id="scraper:search",
+            provenance=_make_provenance(),
+        )
+        state = tracker.compute_taint({"url": "https://evil.com/api/v1"})
+        assert isinstance(state, InfluenceState)
+        assert isinstance(state, TaintState)  # IS-A
+
+    def test_direct_match_evidence(self):
+        tracker = TaintTracker()
+        tracker.record_result(
+            content="Found at https://evil.com/exfil",
+            origin_id="scraper:search",
+            provenance=_make_provenance(),
+        )
+        state = tracker.compute_taint({"target": "https://evil.com/exfil"})
+        assert state.tainted is True
+        assert state.direct_value_match is True
+        assert state.derived_from_untrusted_value is False
+        assert len(state.evidence) >= 1
+        assert state.evidence[0].influence_type == InfluenceType.DIRECT_VALUE_MATCH
+
+    def test_derived_url_reuse_evidence(self):
+        """Same host, different path → derived taint detected."""
+        tracker = TaintTracker()
+        tracker.record_result(
+            content="Found at https://evil.com/api/v1",
+            origin_id="scraper:search",
+            provenance=_make_provenance(),
+        )
+        state = tracker.compute_taint({"target": "https://evil.com/api/v2"})
+        assert state.tainted is True
+        assert state.derived_from_untrusted_value is True
+        assert state.destination_influenced is True
+        derived = [e for e in state.evidence
+                   if e.influence_type == InfluenceType.DERIVED_URL_REUSE]
+        assert len(derived) >= 1
+
+    def test_protocol_change_evidence(self):
+        """https→http on same host → derived protocol change."""
+        tracker = TaintTracker()
+        tracker.record_result(
+            content="Found at https://evil.com/data",
+            origin_id="web:fetch",
+            provenance=_make_provenance(),
+        )
+        state = tracker.compute_taint({"target": "http://evil.com/data"})
+        assert state.tainted is True
+        assert state.destination_influenced is True
+        protocol = [e for e in state.evidence
+                    if e.influence_type == InfluenceType.DERIVED_PROTOCOL_CHANGE]
+        assert len(protocol) >= 1
+
+    def test_no_taint_returns_empty_influence_state(self):
+        tracker = TaintTracker()
+        state = tracker.compute_taint({"query": "hello"})
+        assert isinstance(state, InfluenceState)
+        assert state.tainted is False
+        assert state.evidence == []
+
+    def test_mixed_direct_and_derived(self):
+        """Both direct and derived matches produce correct flags."""
+        tracker = TaintTracker()
+        tracker.record_result(
+            content="Visit https://evil.com/original and user@evil.com",
+            origin_id="web:fetch",
+            provenance=_make_provenance(),
+        )
+        state = tracker.compute_taint({
+            "url": "https://evil.com/original",  # direct
+            "email": "admin@evil.com",  # derived (domain reuse)
+        })
+        assert state.tainted is True
+        assert state.direct_value_match is True
+        assert state.derived_from_untrusted_value is True

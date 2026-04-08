@@ -38,6 +38,9 @@ from .types import (
     ApprovedTool,
     ContentProvenance,
     DestinationPolicy,
+    InfluenceEvidence,
+    InfluenceState,
+    InfluenceType,
     SemanticRiskAssessment,
     SinkDecision,
     TaintState,
@@ -149,48 +152,87 @@ class TaintTracker:
         if len(self._results) > self._max_results:
             self._results = self._results[-self._max_results:]
 
-    def compute_taint(self, args: dict[str, Any]) -> TaintState:
+    def compute_taint(self, args: dict[str, Any]) -> InfluenceState:
         """Check if tool call arguments contain values from previous tool results.
 
         Walks the argument dict recursively, extracts values, and matches
-        against all stored result values.
+        against all stored result values. Returns InfluenceState (IS-A TaintState)
+        with structured evidence of direct and derived influence.
         """
         if not self._results:
-            return TaintState()
+            return InfluenceState()
 
         arg_entries = _extract_values_from_args(args)
         if not arg_entries:
-            return TaintState()
+            return InfluenceState()
 
         taint_sources: list[str] = []
         taint_reasons: list[str] = []
         affected_fields: list[str] = []
+        evidence: list[InfluenceEvidence] = []
         max_confidence = 0.0
 
         for arg_field, arg_extracted in arg_entries:
             for tracked in self._results:
                 for tracked_val in tracked.values:
+                    # Try exact match first
                     confidence = _match_confidence(arg_extracted, tracked_val)
-                    if confidence > 0:
+                    influence_type: InfluenceType | None = (
+                        InfluenceType.DIRECT_VALUE_MATCH if confidence > 0 else None
+                    )
+
+                    # Try derived match if no exact match
+                    if confidence == 0:
+                        confidence, influence_type = _derived_match_confidence(
+                            arg_extracted, tracked_val,
+                        )
+
+                    if confidence > 0 and influence_type is not None:
                         taint_sources.append(tracked.origin_id)
                         taint_reasons.append(
                             f"{arg_extracted.kind}:{arg_extracted.value[:80]} "
                             f"from {tracked.origin_id}"
                         )
                         affected_fields.append(arg_field)
+                        evidence.append(InfluenceEvidence(
+                            influence_type=influence_type,
+                            tracked_value=tracked_val.value[:80],
+                            arg_value=arg_extracted.value[:80],
+                            origin_id=tracked.origin_id,
+                            confidence=confidence,
+                        ))
                         # Amplify confidence if source was risky
                         effective = min(confidence + tracked.risk_score * 0.1, 1.0)
                         max_confidence = max(max_confidence, effective)
 
-        if not taint_sources:
-            return TaintState()
+        if not evidence:
+            return InfluenceState()
 
-        return TaintState(
+        has_direct = any(
+            e.influence_type == InfluenceType.DIRECT_VALUE_MATCH for e in evidence
+        )
+        has_derived = any(
+            e.influence_type != InfluenceType.DIRECT_VALUE_MATCH for e in evidence
+        )
+        destination_types = {
+            InfluenceType.DERIVED_URL_REUSE,
+            InfluenceType.DERIVED_PROTOCOL_CHANGE,
+            InfluenceType.DERIVED_HOSTNAME_IN_URL,
+        }
+        has_destination = any(
+            e.influence_type in destination_types for e in evidence
+        )
+
+        return InfluenceState(
             tainted=True,
             taint_sources=sorted(set(taint_sources)),
             taint_reasons=taint_reasons,
             affected_fields=sorted(set(affected_fields)),
             confidence=round(max_confidence, 2),
+            direct_value_match=has_direct,
+            derived_from_untrusted_value=has_derived,
+            destination_influenced=has_destination,
+            evidence=evidence,
         )
 
     def clear(self) -> None:
@@ -463,6 +505,63 @@ def _match_confidence(arg_val: ExtractedValue, tracked_val: ExtractedValue) -> f
             pass
 
     return 0.0
+
+
+def _derived_match_confidence(
+    arg_val: ExtractedValue, tracked_val: ExtractedValue,
+) -> tuple[float, InfluenceType | None]:
+    """Check for derived (non-exact) taint relationships.
+
+    Called when _match_confidence returns 0.0. Detects transformed values
+    that are still traceable to untrusted origins: URL path changes, protocol
+    swaps, email domain reuse, IP/hostname in host:port patterns.
+    """
+    # Same host, different path or protocol (URL → URL)
+    if arg_val.kind == "url" and tracked_val.kind == "url":
+        try:
+            arg_p = urlparse(arg_val.value)
+            tracked_p = urlparse(tracked_val.value)
+            if arg_p.hostname and tracked_p.hostname and (
+                arg_p.hostname.lower() == tracked_p.hostname.lower()
+            ):
+                if arg_p.scheme.lower() != tracked_p.scheme.lower():
+                    return 0.65, InfluenceType.DERIVED_PROTOCOL_CHANGE
+                if arg_p.path != tracked_p.path:
+                    return 0.6, InfluenceType.DERIVED_URL_REUSE
+        except Exception:
+            pass
+
+    # Email domain reuse (different local part, same domain)
+    if arg_val.kind == "email" and tracked_val.kind == "email":
+        arg_parts = arg_val.value.split("@", 1)
+        tracked_parts = tracked_val.value.split("@", 1)
+        if len(arg_parts) == 2 and len(tracked_parts) == 2:
+            if arg_parts[1].lower() == tracked_parts[1].lower():
+                return 0.5, InfluenceType.DERIVED_EMAIL_DOMAIN
+
+    # Tracked IP appears in host:port arg
+    if arg_val.kind == "host_port" and tracked_val.kind == "ip":
+        host_part = arg_val.value.rsplit(":", 1)[0]
+        if host_part == tracked_val.value:
+            return 0.8, InfluenceType.DERIVED_HOSTNAME_IN_URL
+
+    # Tracked hostname/domain appears in host:port arg
+    if arg_val.kind == "host_port" and tracked_val.kind in ("domain", "hostname"):
+        host_part = arg_val.value.rsplit(":", 1)[0]
+        if (host_part.lower() == tracked_val.value.lower()
+                or host_part.lower().endswith(f".{tracked_val.value.lower()}")):
+            return 0.7, InfluenceType.DERIVED_HOSTNAME_IN_URL
+
+    # Hostname cross-kind matching (PR 12 kinds)
+    if arg_val.kind == "hostname" and tracked_val.kind in ("hostname", "domain"):
+        if arg_val.value.lower() == tracked_val.value.lower():
+            return 0.75, InfluenceType.DIRECT_VALUE_MATCH
+
+    if arg_val.kind == "domain" and tracked_val.kind == "hostname":
+        if arg_val.value.lower() == tracked_val.value.lower():
+            return 0.75, InfluenceType.DIRECT_VALUE_MATCH
+
+    return 0.0, None
 
 
 def _args_contain_outbound_indicators(args: dict[str, Any]) -> bool:

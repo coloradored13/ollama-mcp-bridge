@@ -608,6 +608,44 @@ class TaintState(BaseModel):
     confidence: float = 0.0
 
 
+class InfluenceType(str, Enum):
+    """Classification of how untrusted content influenced tool call args.
+
+    DIRECT_VALUE_MATCH: Exact or near-exact value propagation (existing taint).
+    DERIVED_*: Value was transformed but still traceable to untrusted origin.
+    """
+
+    DIRECT_VALUE_MATCH = "direct_value_match"
+    DERIVED_URL_REUSE = "derived_url_reuse"
+    DERIVED_PROTOCOL_CHANGE = "derived_protocol_change"
+    DERIVED_EMAIL_DOMAIN = "derived_email_domain"
+    DERIVED_HOSTNAME_IN_URL = "derived_hostname_in_url"
+
+
+class InfluenceEvidence(BaseModel):
+    """Single piece of evidence linking a tool call arg to an untrusted source."""
+
+    influence_type: InfluenceType
+    tracked_value: str = ""
+    arg_value: str = ""
+    origin_id: str = ""
+    confidence: float = 0.0
+
+
+class InfluenceState(TaintState):
+    """Richer taint state with derivation tracking (PR 13).
+
+    Extends TaintState so all existing consumers (SinkPolicyEngine, SecurityGateway)
+    work unchanged. New fields provide structured evidence of how untrusted content
+    influenced tool call arguments — direct copy vs. derived transformation.
+    """
+
+    direct_value_match: bool = False
+    derived_from_untrusted_value: bool = False
+    destination_influenced: bool = False
+    evidence: list[InfluenceEvidence] = Field(default_factory=list)
+
+
 class SinkDecision(str, Enum):
     """Policy decision for a tool call evaluated by SinkPolicyEngine.
 

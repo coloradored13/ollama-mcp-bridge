@@ -393,3 +393,92 @@ class TestDestinationMatchResult:
         )
         assert r.matched is True
         assert r.policy_host == "example.com"
+
+
+# --- InfluenceState tests ---
+
+
+from ollama_mcp_bridge.types import (
+    InfluenceEvidence,
+    InfluenceState,
+    InfluenceType,
+    TaintState,
+)
+
+
+class TestInfluenceState:
+    def test_is_a_taint_state(self):
+        """InfluenceState inherits from TaintState."""
+        state = InfluenceState()
+        assert isinstance(state, TaintState)
+
+    def test_defaults(self):
+        state = InfluenceState()
+        assert state.tainted is False
+        assert state.direct_value_match is False
+        assert state.derived_from_untrusted_value is False
+        assert state.destination_influenced is False
+        assert state.evidence == []
+        assert state.taint_sources == []
+        assert state.confidence == 0.0
+
+    def test_tainted_with_evidence(self):
+        evidence = [InfluenceEvidence(
+            influence_type=InfluenceType.DIRECT_VALUE_MATCH,
+            tracked_value="https://evil.com",
+            arg_value="https://evil.com",
+            origin_id="search:web",
+            confidence=0.9,
+        )]
+        state = InfluenceState(
+            tainted=True,
+            taint_sources=["search:web"],
+            confidence=0.9,
+            direct_value_match=True,
+            evidence=evidence,
+        )
+        assert state.tainted is True
+        assert state.direct_value_match is True
+        assert len(state.evidence) == 1
+        assert state.evidence[0].influence_type == InfluenceType.DIRECT_VALUE_MATCH
+
+    def test_derived_only(self):
+        state = InfluenceState(
+            tainted=True,
+            derived_from_untrusted_value=True,
+            destination_influenced=True,
+        )
+        assert state.tainted is True
+        assert state.direct_value_match is False
+        assert state.derived_from_untrusted_value is True
+
+    def test_inherits_taint_state_fields(self):
+        state = InfluenceState(
+            tainted=True,
+            taint_sources=["src"],
+            taint_reasons=["reason"],
+            affected_fields=["url"],
+            confidence=0.75,
+        )
+        assert state.taint_sources == ["src"]
+        assert state.taint_reasons == ["reason"]
+        assert state.affected_fields == ["url"]
+        assert state.confidence == 0.75
+
+
+class TestInfluenceType:
+    def test_enum_values(self):
+        assert InfluenceType.DIRECT_VALUE_MATCH == "direct_value_match"
+        assert InfluenceType.DERIVED_URL_REUSE == "derived_url_reuse"
+        assert InfluenceType.DERIVED_PROTOCOL_CHANGE == "derived_protocol_change"
+        assert InfluenceType.DERIVED_EMAIL_DOMAIN == "derived_email_domain"
+        assert InfluenceType.DERIVED_HOSTNAME_IN_URL == "derived_hostname_in_url"
+
+
+class TestInfluenceEvidence:
+    def test_defaults(self):
+        e = InfluenceEvidence(influence_type=InfluenceType.DIRECT_VALUE_MATCH)
+        assert e.tracked_value == ""
+        assert e.arg_value == ""
+        assert e.origin_id == ""
+        assert e.confidence == 0.0
