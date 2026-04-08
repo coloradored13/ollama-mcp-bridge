@@ -433,6 +433,91 @@ class PathMatchResult(BaseModel):
     failure_reason: str = ""  # empty if matched
 
 
+class RecipientPolicy(BaseModel):
+    """Typed recipient constraint for messaging tool calls.
+
+    Replaces flat approved_recipients list with rich, per-tool validation:
+    exact addresses, domain-level approval, named identity groups, and
+    internal-only mode.
+
+    Configured per server+tool via [recipients.<server>.<tool>] TOML sections.
+    A recipient is allowed if it matches ANY approved address, domain, or group.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    approved_addresses: list[str] = Field(default_factory=list)  # exact email addresses
+    approved_domains: list[str] = Field(default_factory=list)  # @domain.com matching
+    identity_groups: dict[str, list[str]] = Field(default_factory=dict)  # named groups → addresses
+    internal_only: bool = False  # True = only approved_domains/addresses, block everything else
+    allow_first_contact: bool = False  # False = block recipients never seen before
+
+    def validate_recipient(self, email: str) -> "RecipientMatchResult":
+        """Check whether an email address satisfies this policy.
+
+        Validates against exact addresses, domain allowlist, and identity groups.
+        Case-insensitive comparison throughout.
+        """
+        email_lower = email.lower().strip()
+        base = RecipientMatchResult(checked_recipient=email[:200])
+
+        # 1. Exact address match
+        if any(addr.lower() == email_lower for addr in self.approved_addresses):
+            return RecipientMatchResult(
+                matched=True,
+                checked_recipient=email[:200],
+                match_type="exact_address",
+            )
+
+        # 2. Identity group match
+        for group_name, members in self.identity_groups.items():
+            if any(m.lower() == email_lower for m in members):
+                return RecipientMatchResult(
+                    matched=True,
+                    checked_recipient=email[:200],
+                    match_type=f"identity_group:{group_name}",
+                )
+
+        # 3. Domain match
+        if "@" in email_lower:
+            domain = email_lower.split("@", 1)[1]
+            if any(
+                domain == d.lower() or domain.endswith(f".{d.lower()}")
+                for d in self.approved_domains
+            ):
+                return RecipientMatchResult(
+                    matched=True,
+                    checked_recipient=email[:200],
+                    match_type="approved_domain",
+                )
+
+        return RecipientMatchResult(
+            checked_recipient=email[:200],
+            failure_reason=(
+                f"recipient '{email}' does not match any approved address, "
+                f"domain, or identity group"
+            ),
+        )
+
+    @property
+    def has_any_policy(self) -> bool:
+        """True if any approval rule is configured."""
+        return bool(
+            self.approved_addresses
+            or self.approved_domains
+            or self.identity_groups
+        )
+
+
+class RecipientMatchResult(BaseModel):
+    """Result of matching a recipient against a RecipientPolicy."""
+
+    matched: bool = False
+    checked_recipient: str = ""
+    match_type: str = ""  # exact_address, approved_domain, identity_group:<name>
+    failure_reason: str = ""  # empty if matched
+
+
 class DestinationMatchResult(BaseModel):
     """Result of matching a URL against a DestinationPolicy."""
 

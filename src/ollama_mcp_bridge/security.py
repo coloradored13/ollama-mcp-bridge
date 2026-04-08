@@ -2092,14 +2092,18 @@ class SecurityGateway:
                     ),
                 )
 
-        # 5. Capability narrowing — safe adapters (PR 8) + destination/path policies (PR 11/14)
+        # 5. Capability narrowing — safe adapters (PR 8) + destination/path/recipient policies (PR 11/14/15)
         path_policy = self._config.get_path_policy(
+            approved.server, approved.name,
+        )
+        recipient_policy = self._config.get_recipient_policy(
             approved.server, approved.name,
         )
         adapter_errors = run_adapters(
             approved, tool_call.arguments, self._security,
             destination_policies=destination_policies,
             path_policy=path_policy,
+            recipient_policy=recipient_policy,
         )
         if adapter_errors:
             self._audit.log_event(

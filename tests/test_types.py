@@ -667,3 +667,110 @@ class TestPathMatchResult:
             checked_path="/tmp/file.txt",
         )
         assert r.matched is True
+
+
+# --- RecipientPolicy tests ---
+
+
+from ollama_mcp_bridge.types import RecipientMatchResult, RecipientPolicy
+
+
+class TestRecipientPolicy:
+    def test_exact_address_match(self):
+        policy = RecipientPolicy(approved_addresses=["admin@example.com"])
+        result = policy.validate_recipient("admin@example.com")
+        assert result.matched is True
+        assert result.match_type == "exact_address"
+
+    def test_exact_address_case_insensitive(self):
+        policy = RecipientPolicy(approved_addresses=["Admin@Example.COM"])
+        result = policy.validate_recipient("admin@example.com")
+        assert result.matched is True
+
+    def test_unapproved_address_rejected(self):
+        policy = RecipientPolicy(approved_addresses=["admin@example.com"])
+        result = policy.validate_recipient("evil@attacker.com")
+        assert result.matched is False
+        assert "does not match" in result.failure_reason
+
+    def test_domain_match(self):
+        policy = RecipientPolicy(approved_domains=["internal.corp"])
+        result = policy.validate_recipient("anyone@internal.corp")
+        assert result.matched is True
+        assert result.match_type == "approved_domain"
+
+    def test_subdomain_of_approved_domain(self):
+        policy = RecipientPolicy(approved_domains=["corp.com"])
+        result = policy.validate_recipient("user@team.corp.com")
+        assert result.matched is True
+
+    def test_domain_case_insensitive(self):
+        policy = RecipientPolicy(approved_domains=["INTERNAL.CORP"])
+        result = policy.validate_recipient("user@internal.corp")
+        assert result.matched is True
+
+    def test_identity_group_match(self):
+        policy = RecipientPolicy(
+            identity_groups={"engineering": ["alice@co.com", "bob@co.com"]},
+        )
+        result = policy.validate_recipient("alice@co.com")
+        assert result.matched is True
+        assert result.match_type == "identity_group:engineering"
+
+    def test_identity_group_case_insensitive(self):
+        policy = RecipientPolicy(
+            identity_groups={"team": ["Alice@Co.COM"]},
+        )
+        result = policy.validate_recipient("alice@co.com")
+        assert result.matched is True
+
+    def test_no_match_any_rule(self):
+        policy = RecipientPolicy(
+            approved_addresses=["admin@co.com"],
+            approved_domains=["internal.corp"],
+            identity_groups={"team": ["bob@co.com"]},
+        )
+        result = policy.validate_recipient("stranger@evil.com")
+        assert result.matched is False
+
+    def test_has_any_policy_true(self):
+        assert RecipientPolicy(approved_addresses=["a@b.c"]).has_any_policy is True
+        assert RecipientPolicy(approved_domains=["b.c"]).has_any_policy is True
+        assert RecipientPolicy(identity_groups={"g": ["a@b.c"]}).has_any_policy is True
+
+    def test_has_any_policy_false(self):
+        assert RecipientPolicy().has_any_policy is False
+
+    def test_frozen_model(self):
+        policy = RecipientPolicy(approved_addresses=["a@b.c"])
+        with pytest.raises(Exception):
+            policy.approved_addresses = ["x@y.z"]
+
+    def test_defaults(self):
+        policy = RecipientPolicy()
+        assert policy.approved_addresses == []
+        assert policy.approved_domains == []
+        assert policy.identity_groups == {}
+        assert policy.internal_only is False
+        assert policy.allow_first_contact is False
+
+    def test_email_without_at_rejected(self):
+        """Recipient without @ has no domain to match."""
+        policy = RecipientPolicy(approved_domains=["co.com"])
+        result = policy.validate_recipient("nodomain")
+        assert result.matched is False
+
+
+class TestRecipientMatchResult:
+    def test_default_not_matched(self):
+        r = RecipientMatchResult()
+        assert r.matched is False
+        assert r.match_type == ""
+        assert r.failure_reason == ""
+
+    def test_matched_result(self):
+        r = RecipientMatchResult(
+            matched=True, checked_recipient="admin@co.com",
+            match_type="exact_address",
+        )
+        assert r.matched is True

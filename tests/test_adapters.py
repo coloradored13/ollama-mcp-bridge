@@ -532,7 +532,7 @@ class TestSafeURLDestinationPolicies:
 # --- SafePath PathPolicy tests ---
 
 
-from ollama_mcp_bridge.types import PathPolicy, ToolCapabilityManifest
+from ollama_mcp_bridge.types import PathPolicy, RecipientPolicy, ToolCapabilityManifest
 
 
 class TestSafePathWithPathPolicy:
@@ -663,3 +663,157 @@ class TestSafePathWithPathPolicy:
             path_policy=policy,
         )
         assert any("outside allowed roots" in e for e in errors)
+
+
+# --- SafeRecipient RecipientPolicy tests ---
+
+
+class TestSafeRecipientWithRecipientPolicy:
+    """Tests for PR 15 RecipientPolicy support in SafeRecipient adapter."""
+
+    def setup_method(self):
+        self.adapter = SafeRecipient()
+        self.tool = _make_tool()
+        self.config = SecurityConfig()
+
+    def test_approved_address_passes(self):
+        policy = RecipientPolicy(approved_addresses=["admin@example.com"])
+        errors = self.adapter.check(
+            self.tool, {"to": "admin@example.com"}, self.config,
+            recipient_policy=policy,
+        )
+        assert errors == []
+
+    def test_unapproved_address_rejected(self):
+        policy = RecipientPolicy(approved_addresses=["admin@example.com"])
+        errors = self.adapter.check(
+            self.tool, {"to": "attacker@evil.com"}, self.config,
+            recipient_policy=policy,
+        )
+        assert len(errors) == 1
+        assert "does not match" in errors[0]
+
+    def test_domain_match_passes(self):
+        policy = RecipientPolicy(approved_domains=["internal.corp"])
+        errors = self.adapter.check(
+            self.tool, {"to": "anyone@internal.corp"}, self.config,
+            recipient_policy=policy,
+        )
+        assert errors == []
+
+    def test_domain_match_rejects_external(self):
+        policy = RecipientPolicy(approved_domains=["internal.corp"])
+        errors = self.adapter.check(
+            self.tool, {"to": "evil@external.com"}, self.config,
+            recipient_policy=policy,
+        )
+        assert len(errors) == 1
+
+    def test_identity_group_passes(self):
+        policy = RecipientPolicy(
+            identity_groups={"eng": ["alice@co.com", "bob@co.com"]},
+        )
+        errors = self.adapter.check(
+            self.tool, {"to": "alice@co.com"}, self.config,
+            recipient_policy=policy,
+        )
+        assert errors == []
+
+    def test_identity_group_rejects_non_member(self):
+        policy = RecipientPolicy(
+            identity_groups={"eng": ["alice@co.com"]},
+        )
+        errors = self.adapter.check(
+            self.tool, {"to": "stranger@co.com"}, self.config,
+            recipient_policy=policy,
+        )
+        assert len(errors) == 1
+
+    def test_internal_only_with_no_rules_errors(self):
+        """internal_only with no approved addresses/domains should error."""
+        policy = RecipientPolicy(internal_only=True)
+        errors = self.adapter.check(
+            self.tool, {"to": "anyone@anywhere.com"}, self.config,
+            recipient_policy=policy,
+        )
+        assert len(errors) == 1
+        assert "internal_only" in errors[0]
+
+    def test_internal_only_with_domain_passes(self):
+        policy = RecipientPolicy(
+            approved_domains=["internal.corp"],
+            internal_only=True,
+        )
+        errors = self.adapter.check(
+            self.tool, {"to": "user@internal.corp"}, self.config,
+            recipient_policy=policy,
+        )
+        assert errors == []
+
+    def test_internal_only_with_domain_rejects_external(self):
+        policy = RecipientPolicy(
+            approved_domains=["internal.corp"],
+            internal_only=True,
+        )
+        errors = self.adapter.check(
+            self.tool, {"to": "user@external.com"}, self.config,
+            recipient_policy=policy,
+        )
+        assert len(errors) == 1
+
+    def test_case_insensitive(self):
+        policy = RecipientPolicy(approved_addresses=["Admin@EXAMPLE.com"])
+        errors = self.adapter.check(
+            self.tool, {"to": "admin@example.com"}, self.config,
+            recipient_policy=policy,
+        )
+        assert errors == []
+
+    def test_multiple_recipients_all_checked(self):
+        policy = RecipientPolicy(approved_addresses=["good@safe.com"])
+        errors = self.adapter.check(
+            self.tool,
+            {"to": "good@safe.com", "cc": "bad@evil.com"},
+            self.config,
+            recipient_policy=policy,
+        )
+        assert len(errors) == 1
+        assert "bad@evil.com" in errors[0] or "does not match" in errors[0]
+
+    def test_policy_takes_precedence_over_legacy(self):
+        """RecipientPolicy overrides config.approved_recipients."""
+        config = SecurityConfig(approved_recipients=["old@legacy.com"])
+        policy = RecipientPolicy(approved_addresses=["new@modern.com"])
+        errors = self.adapter.check(
+            self.tool, {"to": "new@modern.com"}, config,
+            recipient_policy=policy,
+        )
+        assert errors == []
+
+    def test_legacy_still_works_without_policy(self):
+        """Without recipient_policy, falls back to approved_recipients."""
+        config = SecurityConfig(approved_recipients=["admin@example.com"])
+        errors = self.adapter.check(
+            self.tool, {"to": "admin@example.com"}, config,
+            recipient_policy=None,
+        )
+        assert errors == []
+
+    def test_no_emails_in_args_passes(self):
+        policy = RecipientPolicy(approved_addresses=["admin@example.com"])
+        errors = self.adapter.check(
+            self.tool, {"query": "hello world"}, self.config,
+            recipient_policy=policy,
+        )
+        assert errors == []
+
+    def test_run_adapters_passes_recipient_policy(self):
+        """run_adapters threads recipient_policy through to SafeRecipient."""
+        policy = RecipientPolicy(approved_addresses=["ok@safe.com"])
+        errors = run_adapters(
+            self.tool,
+            {"to": "evil@attacker.com"},
+            self.config,
+            recipient_policy=policy,
+        )
+        assert any("does not match" in e for e in errors)

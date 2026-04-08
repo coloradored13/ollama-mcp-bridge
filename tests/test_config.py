@@ -468,3 +468,110 @@ delete_allowed = true
         policy = cfg.get_path_policy("files", "delete_file")
         assert policy is not None
         assert policy.delete_allowed is True
+
+
+# --- RecipientPolicy config tests ---
+
+
+class TestRecipientPolicyConfig:
+    def test_parse_recipient_policy_from_toml(self, tmp_path: Path):
+        """[recipients.server.tool] TOML sections parse correctly."""
+        toml_content = """\
+[servers.email]
+command = "echo"
+allowed_tools = ["send_email"]
+
+[recipients.email.send_email]
+approved_addresses = ["admin@co.com", "ops@co.com"]
+approved_domains = ["internal.corp"]
+internal_only = true
+"""
+        config_file = tmp_path / "recip.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_recipient_policy("email", "send_email")
+        assert policy is not None
+        assert policy.approved_addresses == ["admin@co.com", "ops@co.com"]
+        assert policy.approved_domains == ["internal.corp"]
+        assert policy.internal_only is True
+
+    def test_recipient_identity_groups(self, tmp_path: Path):
+        toml_content = """\
+[servers.email]
+command = "echo"
+allowed_tools = ["send_email"]
+
+[recipients.email.send_email]
+approved_addresses = []
+
+[recipients.email.send_email.identity_groups]
+engineering = ["alice@co.com", "bob@co.com"]
+leadership = ["ceo@co.com"]
+"""
+        config_file = tmp_path / "groups.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_recipient_policy("email", "send_email")
+        assert policy is not None
+        assert "engineering" in policy.identity_groups
+        assert "alice@co.com" in policy.identity_groups["engineering"]
+        assert "leadership" in policy.identity_groups
+
+    def test_approved_recipients_auto_converts(self, tmp_path: Path):
+        """approved_recipients produces global recipient policy."""
+        toml_content = """\
+[security]
+approved_recipients = ["admin@co.com", "ops@co.com"]
+"""
+        config_file = tmp_path / "compat.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_recipient_policy("any-server", "any-tool")
+        assert policy is not None
+        assert policy.approved_addresses == ["admin@co.com", "ops@co.com"]
+
+    def test_get_recipient_policy_tool_specific(self, tmp_path: Path):
+        """Tool-specific recipient policy takes precedence."""
+        toml_content = """\
+[servers.email]
+command = "echo"
+allowed_tools = ["send_email"]
+
+[recipients.email.send_email]
+approved_addresses = ["specific@co.com"]
+
+[security]
+approved_recipients = ["global@co.com"]
+"""
+        config_file = tmp_path / "specific.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_recipient_policy("email", "send_email")
+        assert policy is not None
+        assert policy.approved_addresses == ["specific@co.com"]
+
+    def test_get_recipient_policy_server_wide_fallback(self, tmp_path: Path):
+        toml_content = """\
+[servers.email]
+command = "echo"
+allowed_tools = ["send_email", "send_notification"]
+
+[recipients.email._all]
+approved_domains = ["internal.corp"]
+"""
+        config_file = tmp_path / "serverwide.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policy = cfg.get_recipient_policy("email", "send_email")
+        assert policy is not None
+        assert policy.approved_domains == ["internal.corp"]
+
+    def test_get_recipient_policy_no_config(self):
+        """No recipient config returns None."""
+        cfg = BridgeConfig()
+        assert cfg.get_recipient_policy("server", "tool") is None
