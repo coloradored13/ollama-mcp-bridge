@@ -389,3 +389,141 @@ class TestRunAdapters:
         adapter_names = {e.split("]")[0].strip("[") for e in errors}
         assert "safe_url" in adapter_names
         assert "safe_path" in adapter_names
+
+
+# --- SafeURL Destination Policy tests ---
+
+
+from ollama_mcp_bridge.types import DestinationPolicy, ToolCapabilityManifest
+
+
+class TestSafeURLDestinationPolicies:
+    """Tests for PR 11 destination policy support in SafeURL adapter."""
+
+    def setup_method(self):
+        self.adapter = SafeURL()
+        self.tool = _make_tool()
+        self.config = SecurityConfig()
+
+    def test_url_matching_policy_passes(self):
+        policies = [DestinationPolicy(host="api.example.com")]
+        errors = self.adapter.check(
+            self.tool, {"url": "https://api.example.com/v1"}, self.config,
+            destination_policies=policies,
+        )
+        assert errors == []
+
+    def test_url_not_matching_policy_rejected(self):
+        policies = [DestinationPolicy(host="api.example.com")]
+        errors = self.adapter.check(
+            self.tool, {"url": "https://evil.com/exfil"}, self.config,
+            destination_policies=policies,
+        )
+        assert len(errors) == 1
+        assert "does not match any destination policy" in errors[0]
+
+    def test_scheme_mismatch_rejected(self):
+        policies = [DestinationPolicy(host="api.example.com", scheme="https")]
+        errors = self.adapter.check(
+            self.tool, {"url": "http://api.example.com/v1"}, self.config,
+            destination_policies=policies,
+        )
+        assert len(errors) == 1
+        assert "scheme" in errors[0]
+
+    def test_path_prefix_enforced(self):
+        policies = [DestinationPolicy(
+            host="api.example.com", path_prefixes=["/v1/"],
+        )]
+        errors = self.adapter.check(
+            self.tool, {"url": "https://api.example.com/admin/secret"}, self.config,
+            destination_policies=policies,
+        )
+        assert len(errors) == 1
+        assert "path" in errors[0]
+
+    def test_port_enforced(self):
+        policies = [DestinationPolicy(host="api.example.com", port=8443)]
+        errors = self.adapter.check(
+            self.tool, {"url": "https://api.example.com:9999/v1"}, self.config,
+            destination_policies=policies,
+        )
+        assert len(errors) == 1
+        assert "port" in errors[0]
+
+    def test_ip_literal_blocked(self):
+        policies = [DestinationPolicy(host="10.0.0.1")]
+        errors = self.adapter.check(
+            self.tool, {"url": "https://10.0.0.1/api"}, self.config,
+            destination_policies=policies,
+        )
+        assert len(errors) == 1
+        assert "IP literal" in errors[0]
+
+    def test_multiple_policies_any_match_passes(self):
+        policies = [
+            DestinationPolicy(host="internal.example.com"),
+            DestinationPolicy(host="partner.example.com"),
+        ]
+        errors = self.adapter.check(
+            self.tool, {"url": "https://partner.example.com/hook"}, self.config,
+            destination_policies=policies,
+        )
+        assert errors == []
+
+    def test_require_flag_blocks_outbound_tool_no_policies(self):
+        """require_destination_policy_for_outbound blocks outbound tools without policies."""
+        config = SecurityConfig(require_destination_policy_for_outbound=True)
+        tool = ApprovedTool(
+            server="test-server",
+            name="send_data",
+            description="Sends data externally",
+            input_schema=_SCHEMA,
+            classification=ActionClass.WRITE,
+            definition_hash="abc123",
+            capabilities=ToolCapabilityManifest(outbound_data_transfer=True),
+        )
+        errors = self.adapter.check(
+            tool, {"url": "https://evil.com/exfil"}, config,
+            destination_policies=None,
+        )
+        assert len(errors) == 1
+        assert "require_destination_policy_for_outbound" in errors[0]
+
+    def test_require_flag_no_urls_no_error(self):
+        """require flag only triggers when URLs are actually present in args."""
+        config = SecurityConfig(require_destination_policy_for_outbound=True)
+        tool = ApprovedTool(
+            server="test-server",
+            name="send_data",
+            description="Sends data externally",
+            input_schema=_SCHEMA,
+            classification=ActionClass.WRITE,
+            definition_hash="abc123",
+            capabilities=ToolCapabilityManifest(outbound_data_transfer=True),
+        )
+        errors = self.adapter.check(
+            tool, {"data": "just plain text"}, config,
+            destination_policies=None,
+        )
+        assert errors == []
+
+    def test_run_adapters_passes_destination_policies(self):
+        """run_adapters threads destination_policies through to SafeURL."""
+        policies = [DestinationPolicy(host="allowed.com")]
+        errors = run_adapters(
+            self.tool,
+            {"url": "https://evil.com/exfil"},
+            self.config,
+            destination_policies=policies,
+        )
+        assert any("does not match any destination policy" in e for e in errors)
+
+    def test_legacy_domain_list_still_works_without_policies(self):
+        """Without destination_policies, falls back to allowed_outbound_domains."""
+        config = SecurityConfig(allowed_outbound_domains=["example.com"])
+        errors = self.adapter.check(
+            self.tool, {"url": "https://example.com/api"}, config,
+            destination_policies=None,
+        )
+        assert errors == []

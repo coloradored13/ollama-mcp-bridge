@@ -16,10 +16,12 @@ scanning has occurred. Code that receives a ToolSchema must assume it could be m
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -262,6 +264,155 @@ class ToolCapabilityManifest(BaseModel):
         }
         flags["source"] = self.source.value
         return flags
+
+
+class DestinationMatchResult(BaseModel):
+    """Result of matching a URL against a DestinationPolicy."""
+
+    matched: bool = False
+    policy_host: str = ""
+    checked_url: str = ""
+    failure_reason: str = ""  # empty if matched
+
+
+class DestinationPolicy(BaseModel):
+    """Typed destination constraint for outbound tool calls.
+
+    Replaces coarse domain-only allowlists with rich, per-field validation:
+    scheme, host, port, path, query, IP literal controls, redirect controls.
+
+    Configured per server+tool via [[destinations.<server>.<tool>]] TOML sections.
+    Multiple policies per tool are supported (array of tables). A URL is allowed
+    if it matches ANY one of the configured policies for the tool.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    scheme: str = "https"
+    host: str  # required — the target hostname
+    port: int | None = None  # None = any port allowed for the scheme
+    path_prefixes: list[str] = Field(default_factory=list)  # empty = any path
+    query_constraints: dict[str, str] = Field(default_factory=dict)
+    allow_subdomains: bool = False
+    allow_ip_literals: bool = False
+    allow_private_ranges: bool = False
+    allow_redirects: bool = False
+    allowed_methods: list[str] = Field(default_factory=list)  # empty = any method
+    max_payload_bytes: int = 65536
+
+    def matches(self, url: str) -> DestinationMatchResult:
+        """Check whether a URL satisfies all constraints in this policy.
+
+        Validates scheme, host, IP literal status, private range, port,
+        and path prefix in order. Returns a structured result with the
+        specific failure reason if the URL does not match.
+        """
+        base = DestinationMatchResult(policy_host=self.host, checked_url=url[:200])
+
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return DestinationMatchResult(
+                policy_host=self.host, checked_url=url[:200],
+                failure_reason="malformed URL",
+            )
+
+        hostname = parsed.hostname
+        if not hostname:
+            return DestinationMatchResult(
+                policy_host=self.host, checked_url=url[:200],
+                failure_reason="URL has no hostname",
+            )
+
+        # 1. Scheme
+        if parsed.scheme.lower() != self.scheme.lower():
+            return DestinationMatchResult(
+                **{**base.model_dump(), "failure_reason": (
+                    f"scheme '{parsed.scheme}' does not match "
+                    f"required '{self.scheme}'"
+                )},
+            )
+
+        # 2. IP literal check (before host comparison)
+        is_ip = False
+        try:
+            addr = ipaddress.ip_address(hostname)
+            is_ip = True
+        except ValueError:
+            pass
+
+        if is_ip and not self.allow_ip_literals:
+            return DestinationMatchResult(
+                **{**base.model_dump(), "failure_reason": (
+                    f"IP literal '{hostname}' not allowed "
+                    f"(allow_ip_literals=False)"
+                )},
+            )
+
+        # 3. Private range check
+        if is_ip and not self.allow_private_ranges:
+            if addr.is_private or addr.is_loopback or addr.is_link_local:
+                return DestinationMatchResult(
+                    **{**base.model_dump(), "failure_reason": (
+                        f"private/loopback IP '{hostname}' not allowed "
+                        f"(allow_private_ranges=False)"
+                    )},
+                )
+
+        # 4. Host match
+        if not is_ip:
+            hostname_lower = hostname.lower()
+            policy_host_lower = self.host.lower()
+            if hostname_lower == policy_host_lower:
+                pass  # exact match
+            elif self.allow_subdomains and hostname_lower.endswith(
+                f".{policy_host_lower}"
+            ):
+                pass  # subdomain match
+            else:
+                return DestinationMatchResult(
+                    **{**base.model_dump(), "failure_reason": (
+                        f"host '{hostname}' does not match "
+                        f"policy host '{self.host}'"
+                        f"{' (subdomains not allowed)' if not self.allow_subdomains else ''}"
+                    )},
+                )
+        else:
+            # IP literal that passed the allow check — still must match host
+            if hostname != self.host:
+                return DestinationMatchResult(
+                    **{**base.model_dump(), "failure_reason": (
+                        f"IP '{hostname}' does not match policy host '{self.host}'"
+                    )},
+                )
+
+        # 5. Port
+        if self.port is not None:
+            url_port = parsed.port
+            if url_port is None:
+                # Use default port for scheme
+                url_port = 443 if self.scheme.lower() == "https" else 80
+            if url_port != self.port:
+                return DestinationMatchResult(
+                    **{**base.model_dump(), "failure_reason": (
+                        f"port {url_port} does not match required port {self.port}"
+                    )},
+                )
+
+        # 6. Path prefixes
+        if self.path_prefixes:
+            path = parsed.path or "/"
+            if not any(path.startswith(prefix) for prefix in self.path_prefixes):
+                return DestinationMatchResult(
+                    **{**base.model_dump(), "failure_reason": (
+                        f"path '{path}' does not match any allowed prefix "
+                        f"({', '.join(self.path_prefixes)})"
+                    )},
+                )
+
+        return DestinationMatchResult(
+            matched=True, policy_host=self.host, checked_url=url[:200],
+        )
 
 
 class ApprovedTool(BaseModel):

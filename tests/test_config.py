@@ -211,3 +211,135 @@ allowed_tools = ["tool1"]
         cfg = load_config(config_file)
         assert cfg.ollama_host == "http://127.0.0.1:11434"
         assert len(cfg.servers) == 0
+
+
+# --- Destination Policy Config tests ---
+
+
+from ollama_mcp_bridge.types import DestinationPolicy
+
+
+class TestDestinationPolicyConfig:
+    def test_parse_destination_from_toml(self, tmp_path: Path):
+        """[[destinations.server.tool]] TOML sections parse correctly."""
+        toml_content = """\
+[servers.webhooks]
+command = "echo"
+allowed_tools = ["send_event"]
+
+[[destinations.webhooks.send_event]]
+scheme = "https"
+host = "hooks.internal"
+path_prefixes = ["/agent-events"]
+max_payload_bytes = 32768
+"""
+        config_file = tmp_path / "dest.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policies = cfg.get_destination_policies("webhooks", "send_event")
+        assert len(policies) == 1
+        assert policies[0].host == "hooks.internal"
+        assert policies[0].scheme == "https"
+        assert policies[0].path_prefixes == ["/agent-events"]
+        assert policies[0].max_payload_bytes == 32768
+
+    def test_multiple_policies_per_tool(self, tmp_path: Path):
+        """Multiple [[destinations.server.tool]] entries produce a list."""
+        toml_content = """\
+[servers.api]
+command = "echo"
+allowed_tools = ["call"]
+
+[[destinations.api.call]]
+host = "api.example.com"
+path_prefixes = ["/v1/"]
+
+[[destinations.api.call]]
+host = "api.partner.com"
+path_prefixes = ["/webhook"]
+"""
+        config_file = tmp_path / "multi.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policies = cfg.get_destination_policies("api", "call")
+        assert len(policies) == 2
+        hosts = {p.host for p in policies}
+        assert hosts == {"api.example.com", "api.partner.com"}
+
+    def test_single_table_destination(self, tmp_path: Path):
+        """[destinations.server.tool] (non-array) also works."""
+        toml_content = """\
+[servers.api]
+command = "echo"
+allowed_tools = ["fetch"]
+
+[destinations.api.fetch]
+host = "api.example.com"
+"""
+        config_file = tmp_path / "single.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policies = cfg.get_destination_policies("api", "fetch")
+        assert len(policies) == 1
+        assert policies[0].host == "api.example.com"
+
+    def test_allowed_outbound_domains_auto_converts(self, tmp_path: Path):
+        """allowed_outbound_domains produces global destination policies."""
+        toml_content = """\
+[security]
+allowed_outbound_domains = ["example.com", "api.co"]
+"""
+        config_file = tmp_path / "compat.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        # Global policies available for any server/tool
+        policies = cfg.get_destination_policies("any-server", "any-tool")
+        assert len(policies) == 4  # 2 domains x 2 schemes (https + http)
+        hosts = {p.host for p in policies}
+        assert hosts == {"example.com", "api.co"}
+        schemes = {p.scheme for p in policies}
+        assert schemes == {"https", "http"}
+        # All should allow subdomains (backward compat)
+        assert all(p.allow_subdomains for p in policies)
+
+    def test_get_destination_policies_tool_specific_plus_global(self, tmp_path: Path):
+        """Tool-specific policies are combined with global fallback."""
+        toml_content = """\
+[servers.api]
+command = "echo"
+allowed_tools = ["send"]
+
+[[destinations.api.send]]
+host = "specific.com"
+
+[security]
+allowed_outbound_domains = ["global.com"]
+"""
+        config_file = tmp_path / "combined.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        policies = cfg.get_destination_policies("api", "send")
+        # 1 tool-specific + 2 global (https + http)
+        assert len(policies) == 3
+        hosts = {p.host for p in policies}
+        assert "specific.com" in hosts
+        assert "global.com" in hosts
+
+    def test_get_destination_policies_no_config(self):
+        """No destination config returns empty list."""
+        cfg = BridgeConfig()
+        assert cfg.get_destination_policies("server", "tool") == []
+
+    def test_require_destination_policy_field(self):
+        """SecurityConfig accepts require_destination_policy_for_outbound."""
+        cfg = SecurityConfig(require_destination_policy_for_outbound=True)
+        assert cfg.require_destination_policy_for_outbound is True
+
+    def test_require_destination_policy_default_false(self):
+        cfg = SecurityConfig()
+        assert cfg.require_destination_policy_for_outbound is False

@@ -37,6 +37,7 @@ from .types import (
     ActionClass,
     ApprovedTool,
     ContentProvenance,
+    DestinationPolicy,
     SemanticRiskAssessment,
     SinkDecision,
     TaintState,
@@ -199,6 +200,7 @@ class SinkPolicyEngine:
         args: dict[str, Any],
         taint_state: TaintState,
         config: SecurityConfig,
+        destination_policies: list[DestinationPolicy] | None = None,
     ) -> SinkDecision:
         """Evaluate sink policy for a tool call.
 
@@ -213,9 +215,17 @@ class SinkPolicyEngine:
             return SinkDecision.ALLOW
 
         if sink_type == SinkType.OUTBOUND:
-            # Check allowed_outbound_domains exception
-            if self._all_domains_allowed(args, config.allowed_outbound_domains):
+            # Check destination policies first (PR 11), fall back to domain list
+            if destination_policies:
+                if self._all_destinations_allowed(args, destination_policies):
+                    return SinkDecision.ALLOW_WITH_NOTICE
+            elif self._all_domains_allowed(args, config.allowed_outbound_domains):
                 return SinkDecision.ALLOW_WITH_NOTICE
+
+            # No policy match — check require flag
+            if config.require_destination_policy_for_outbound and not destination_policies:
+                return SinkDecision.BLOCK
+
             if config.block_tainted_exfiltration:
                 return SinkDecision.BLOCK
             if config.tainted_sink_requires_confirmation:
@@ -294,6 +304,19 @@ class SinkPolicyEngine:
             any(domain == allowed or domain.endswith(f".{allowed}")
                 for allowed in allowed_domains)
             for domain in domains
+        )
+
+    def _all_destinations_allowed(
+        self, args: dict[str, Any], policies: list[DestinationPolicy],
+    ) -> bool:
+        """Check if all URLs in args match at least one destination policy."""
+        urls = _extract_urls_from_args(args)
+        if not urls:
+            return False  # no URLs to validate = can't confirm allowed
+
+        return all(
+            any(policy.matches(url).matched for policy in policies)
+            for url in urls
         )
 
 
@@ -431,6 +454,12 @@ def _extract_domains_from_args(args: dict[str, Any]) -> list[str]:
             except Exception:
                 pass
     return list(set(domains))
+
+
+def _extract_urls_from_args(args: dict[str, Any]) -> list[str]:
+    """Extract all URL strings from tool arguments."""
+    entries = _extract_values_from_args(args)
+    return [ev.value for _, ev in entries if ev.kind == "url"]
 
 
 def _is_memory_write_tool(tool_name: str) -> bool:

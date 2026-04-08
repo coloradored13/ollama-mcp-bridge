@@ -2017,7 +2017,10 @@ class SecurityGateway:
                 reason="gate_denied",
             )
 
-        # 4. Sink policy — taint tracking (PR 7)
+        # 4. Sink policy — taint tracking (PR 7) + destination policies (PR 11)
+        destination_policies = self._config.get_destination_policies(
+            approved.server, approved.name,
+        ) or None
         taint_state = self._taint_tracker.compute_taint(tool_call.arguments)
         if taint_state.tainted:
             sink_decision = self._sink_policy.evaluate(
@@ -2025,6 +2028,7 @@ class SecurityGateway:
                 args=tool_call.arguments,
                 taint_state=taint_state,
                 config=self._security,
+                destination_policies=destination_policies,
             )
 
             if sink_decision == SinkDecision.BLOCK:
@@ -2088,8 +2092,11 @@ class SecurityGateway:
                     ),
                 )
 
-        # 5. Capability narrowing — safe adapters (PR 8)
-        adapter_errors = run_adapters(approved, tool_call.arguments, self._security)
+        # 5. Capability narrowing — safe adapters (PR 8) + destination policies (PR 11)
+        adapter_errors = run_adapters(
+            approved, tool_call.arguments, self._security,
+            destination_policies=destination_policies,
+        )
         if adapter_errors:
             self._audit.log_event(
                 AuditEventType.TOOL_BLOCKED,

@@ -30,7 +30,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .errors import ConfigError
-from .types import ActionClass, CapabilitySource, ToolCapabilityManifest
+from .types import ActionClass, CapabilitySource, DestinationPolicy, ToolCapabilityManifest
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,7 @@ class SecurityConfig(BaseModel):
     block_tainted_exfiltration: bool = True
     block_tainted_destructive_write: bool = True
     allowed_outbound_domains: list[str] = Field(default_factory=list)
+    require_destination_policy_for_outbound: bool = False
     allow_memory_writes_from_third_party_content: bool = False
     # Capability narrowing — safe adapters (opt-in, empty = disabled)
     allowed_path_roots: list[str] = Field(default_factory=list)
@@ -145,6 +146,7 @@ class BridgeConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     capabilities: dict[str, dict[str, ToolCapabilityManifest]] = Field(default_factory=dict)
+    destinations: dict[str, dict[str, list[DestinationPolicy]]] = Field(default_factory=dict)
 
     @field_validator("ollama_host")
     @classmethod
@@ -224,6 +226,21 @@ class BridgeConfig(BaseModel):
             return None
         return server_caps.get(tool)
 
+    def get_destination_policies(self, server: str, tool: str) -> list[DestinationPolicy]:
+        """Look up destination policies for a server+tool pair.
+
+        Returns policies from:
+        1. Tool-specific [[destinations.<server>.<tool>]] config
+        2. Global policies converted from allowed_outbound_domains (fallback)
+        """
+        server_dests = self.destinations.get(server, {})
+        tool_policies = server_dests.get(tool, [])
+
+        # Also include global policies (backward-compat from allowed_outbound_domains)
+        global_policies = self.destinations.get("_global", {}).get("_all", [])
+
+        return tool_policies + global_policies
+
 
 def load_config(path: str | Path) -> BridgeConfig:
     """Load bridge configuration from a TOML file.
@@ -253,6 +270,7 @@ def load_config(path: str | Path) -> BridgeConfig:
     security_raw = raw.get("security", {})
     logging_raw = raw.get("logging", {})
     capabilities_raw = raw.get("capabilities", {})
+    destinations_raw = raw.get("destinations", {})
 
     try:
         servers = {name: ServerConfig(**cfg) for name, cfg in servers_raw.items()}
@@ -277,12 +295,59 @@ def load_config(path: str | Path) -> BridgeConfig:
                     **cap_fields,
                 )
 
+        # Parse [[destinations.<server>.<tool>]] sections
+        destinations: dict[str, dict[str, list[DestinationPolicy]]] = {}
+        for server_name, tools in destinations_raw.items():
+            if not isinstance(tools, dict):
+                raise ConfigError(
+                    f"destinations.{server_name} must be a table of tool configs"
+                )
+            destinations[server_name] = {}
+            for tool_name, policy_data in tools.items():
+                if isinstance(policy_data, list):
+                    # [[destinations.server.tool]] — array of tables
+                    destinations[server_name][tool_name] = [
+                        DestinationPolicy(**p) for p in policy_data
+                    ]
+                elif isinstance(policy_data, dict):
+                    # [destinations.server.tool] — single table
+                    destinations[server_name][tool_name] = [
+                        DestinationPolicy(**policy_data)
+                    ]
+                else:
+                    raise ConfigError(
+                        f"destinations.{server_name}.{tool_name} "
+                        f"must be a table or array of tables"
+                    )
+
+        # Auto-convert allowed_outbound_domains to global destination policies
+        if security.allowed_outbound_domains:
+            logger.info(
+                "Converting allowed_outbound_domains to destination policies "
+                "(backward compatibility). Consider migrating to "
+                "[[destinations.<server>.<tool>]] for finer control."
+            )
+            global_policies: list[DestinationPolicy] = []
+            for domain in security.allowed_outbound_domains:
+                # Generate both https and http to match current scheme-agnostic behavior
+                for scheme in ("https", "http"):
+                    global_policies.append(DestinationPolicy(
+                        host=domain,
+                        scheme=scheme,
+                        allow_subdomains=True,
+                        allow_ip_literals=False,
+                        allow_private_ranges=False,
+                        allow_redirects=True,
+                    ))
+            destinations.setdefault("_global", {})["_all"] = global_policies
+
         return BridgeConfig(
             ollama_host=bridge_raw.get("ollama_host", "http://127.0.0.1:11434"),
             servers=servers,
             security=security,
             logging=logging_cfg,
             capabilities=capabilities,
+            destinations=destinations,
         )
     except ConfigError:
         raise
