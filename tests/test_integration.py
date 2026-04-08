@@ -2047,8 +2047,14 @@ class TestTaintTrackingIntegration:
         assert "test-server:echo" in taint_events[0].reason
 
     @pytest.mark.asyncio
-    async def test_tainted_general_write_allowed_with_notice(self, gateway_setup):
-        """Tainted args to a general write tool produce ALLOW_WITH_NOTICE (not blocked)."""
+    async def test_tainted_ip_in_general_write_blocked_as_outbound(self, gateway_setup):
+        """Tainted IP in args → outbound classification → BLOCK (PR 12 hardening).
+
+        Prior to PR 12, IPs in args didn't trigger outbound detection, so this
+        was classified as general write (ALLOW_WITH_NOTICE). Now IPs are outbound
+        indicators, matching the spec: "IP-based exfiltration paths are classified
+        as outbound."
+        """
         gateway, mcp, audit = gateway_setup
         await gateway.connect_and_scan()
 
@@ -2062,22 +2068,14 @@ class TestTaintTrackingIntegration:
         )
         await gateway.execute_tool(tc1, model_id="test", turn=0)
 
-        # Tool call with the tainted IP, but to a non-sensitive tool (general write)
+        # Tool call with the tainted IP — now classified as outbound (PR 12)
         mcp.call_tool = AsyncMock(return_value="added")
         tc2 = OllamaToolCall(
             function_name="test-server__add",
             arguments={"input": "connect to 192.168.1.100"},
         )
-        result = await gateway.execute_tool(tc2, model_id="test", turn=1)
-        assert result.content  # not blocked
-
-        # But audit should show TAINTED_SINK_DETECTED
-        entries = audit.get_session_entries()
-        detected_events = [
-            e for e in entries
-            if e.event_type == AuditEventType.TAINTED_SINK_DETECTED
-        ]
-        assert len(detected_events) >= 1
+        with pytest.raises(ToolBlockedError, match="blocked.*untrusted tool results"):
+            await gateway.execute_tool(tc2, model_id="test", turn=1)
 
     @pytest.mark.asyncio
     async def test_tainted_destructive_requires_confirmation(self, tmp_path):

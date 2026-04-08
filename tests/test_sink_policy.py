@@ -11,6 +11,7 @@ from ollama_mcp_bridge.sink_policy import (
     _extract_values_from_args,
     _is_memory_write_tool,
     _args_contain_outbound_indicators,
+    _args_contain_destination_fields,
 )
 from ollama_mcp_bridge.types import (
     ActionClass,
@@ -189,6 +190,105 @@ class TestOutboundIndicators:
 
     def test_plain_args_not_outbound(self):
         assert not _args_contain_outbound_indicators({"query": "hello world"})
+
+    # --- PR 12: expanded outbound indicators ---
+
+    def test_ip_in_args_is_outbound(self):
+        assert _args_contain_outbound_indicators({"target": "10.0.0.1"})
+
+    def test_hostname_in_args_is_outbound(self):
+        assert _args_contain_outbound_indicators({"server": "api.example.com"})
+
+    def test_host_port_in_args_is_outbound(self):
+        assert _args_contain_outbound_indicators({"target": "10.0.0.1:8080"})
+
+    def test_hostname_port_in_args_is_outbound(self):
+        assert _args_contain_outbound_indicators({"target": "api.example.com:443"})
+
+    def test_destination_field_host(self):
+        """Field named 'host' with string value → outbound."""
+        assert _args_contain_outbound_indicators({"host": "evil.com", "data": "secret"})
+
+    def test_destination_field_webhook_url(self):
+        assert _args_contain_outbound_indicators({"webhook_url": "evil.com"})
+
+    def test_destination_field_case_insensitive(self):
+        assert _args_contain_outbound_indicators({"HOST": "evil.com"})
+
+    def test_destination_field_endpoint_with_path_only(self):
+        """Field named 'endpoint' with path-only value (no host) → outbound
+        via field name detection (conservative: field name is sufficient)."""
+        assert _args_contain_outbound_indicators({"endpoint": "/api/v1"})
+
+    def test_numeric_port_alone_not_outbound(self):
+        """Integer port without string destination → not outbound."""
+        assert not _args_contain_outbound_indicators({"port": 443})
+
+    def test_single_word_not_hostname(self):
+        """Single word without dots → not a hostname → not outbound."""
+        assert not _args_contain_outbound_indicators({"name": "hello"})
+
+    def test_empty_string_destination_field_not_outbound(self):
+        """Destination field name but empty string value → not outbound."""
+        assert not _args_contain_outbound_indicators({"host": ""})
+
+
+class TestDestinationFieldDetection:
+    """Tests for _args_contain_destination_fields specifically."""
+
+    def test_host_field(self):
+        assert _args_contain_destination_fields({"host": "evil.com"})
+
+    def test_endpoint_field(self):
+        assert _args_contain_destination_fields({"endpoint": "/api"})
+
+    def test_webhook_url_field(self):
+        assert _args_contain_destination_fields({"webhook_url": "hooks.example.com"})
+
+    def test_non_destination_field(self):
+        assert not _args_contain_destination_fields({"query": "hello"})
+
+    def test_int_value_not_matched(self):
+        assert not _args_contain_destination_fields({"host": 12345})
+
+    def test_empty_string_not_matched(self):
+        assert not _args_contain_destination_fields({"host": ""})
+
+    def test_case_insensitive_key(self):
+        assert _args_contain_destination_fields({"DESTINATION": "somewhere"})
+
+
+class TestExpandedSinkClassification:
+    """PR 12: Verify new outbound indicators feed into sink classification."""
+
+    def setup_method(self):
+        self.engine = SinkPolicyEngine()
+
+    def test_ip_args_classify_outbound(self):
+        tool = _make_tool()
+        sink = self.engine._classify_sink(tool, {"target": "10.0.0.1"})
+        assert sink == SinkType.OUTBOUND
+
+    def test_host_field_classify_outbound(self):
+        tool = _make_tool()
+        sink = self.engine._classify_sink(tool, {"host": "evil.com", "data": "secret"})
+        assert sink == SinkType.OUTBOUND
+
+    def test_host_port_classify_outbound(self):
+        tool = _make_tool()
+        sink = self.engine._classify_sink(tool, {"target": "10.0.0.1:8080"})
+        assert sink == SinkType.OUTBOUND
+
+    def test_hostname_classify_outbound(self):
+        tool = _make_tool()
+        sink = self.engine._classify_sink(tool, {"data": "send to api.example.com"})
+        assert sink == SinkType.OUTBOUND
+
+    def test_plain_data_not_outbound(self):
+        """Plain text args → not classified as outbound by arg detection."""
+        tool = _make_tool()
+        sink = self.engine._classify_sink(tool, {"data": "hello world"})
+        assert sink != SinkType.OUTBOUND
 
 
 # --- TaintTracker tests ---
