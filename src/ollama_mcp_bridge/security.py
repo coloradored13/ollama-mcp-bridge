@@ -63,7 +63,7 @@ from typing import Any, Awaitable, Callable, Protocol
 import jsonschema
 
 from .audit import AuditLogger
-from .config import BridgeConfig, SecurityConfig
+from .config import BridgeConfig, DeploymentMode, SecurityConfig, SecurityProfile
 from .errors import (
     ConfirmationDeniedError,
     MCPToolError,
@@ -1604,6 +1604,138 @@ class SecurityGateway:
                 reason=f"state_{state.value}",
             )
 
+    def _check_profile_requirements(
+        self, server_name: str, tool_name: str, approved: ApprovedTool,
+    ) -> str | None:
+        """Check whether a tool meets the active security profile's requirements.
+
+        Returns None if the tool passes, or an error string if it should be blocked.
+        """
+        profile = self._security.security_profile
+
+        if profile == SecurityProfile.HIGH_CONSEQUENCE:
+            caps = approved.capabilities
+
+            # Dangerous tools must have explicit (non-inferred) capability manifest
+            if caps.is_dangerous and caps.source == CapabilitySource.INFERRED:
+                return (
+                    f"high_consequence profile requires explicit capability manifest "
+                    f"for dangerous tool '{tool_name}' (currently inferred-only). "
+                    f"Add [capabilities.{server_name}.{tool_name}] to config."
+                )
+
+            # Outbound-capable tools require destination policy
+            if caps.has_outbound_capability:
+                policies = self._config.get_destination_policies(server_name, tool_name)
+                if not policies:
+                    return (
+                        f"high_consequence profile requires destination policy "
+                        f"for outbound-capable tool '{tool_name}'. "
+                        f"Add [[destinations.{server_name}.{tool_name}]] to config."
+                    )
+
+            # Filesystem tools require path policy
+            if caps.filesystem_write or caps.filesystem_delete:
+                path_policy = self._config.get_path_policy(server_name, tool_name)
+                if not path_policy:
+                    return (
+                        f"high_consequence profile requires path policy "
+                        f"for filesystem-write tool '{tool_name}'. "
+                        f"Add [paths.{server_name}.{tool_name}] to config."
+                    )
+
+            # Messaging tools require recipient policy
+            if caps.external_messaging:
+                recip_policy = self._config.get_recipient_policy(server_name, tool_name)
+                if not recip_policy:
+                    return (
+                        f"high_consequence profile requires recipient policy "
+                        f"for messaging tool '{tool_name}'. "
+                        f"Add [recipients.{server_name}.{tool_name}] to config."
+                    )
+
+            # Memory-write tools blocked unless explicitly allowed
+            if caps.memory_write and not self._security.allow_memory_writes_from_third_party_content:
+                return (
+                    f"high_consequence profile blocks memory-write tool '{tool_name}' "
+                    f"unless allow_memory_writes_from_third_party_content=True."
+                )
+
+        return None
+
+    def validate_deployment(self) -> list[str]:
+        """Run deployment validation checks against approved tools.
+
+        Returns a list of warnings. In high_consequence deployment mode,
+        raises ConfigError for missing required assertions.
+        """
+        from .config import ConfigError
+
+        warnings: list[str] = []
+        mode = self._security.deployment_mode
+
+        for namespaced, tool in self._approved_tools.items():
+            caps = tool.capabilities
+
+            # Outbound tool without destination policy
+            if caps.has_outbound_capability:
+                policies = self._config.get_destination_policies(tool.server, tool.name)
+                if not policies:
+                    warnings.append(
+                        f"Tool '{tool.name}' on '{tool.server}' has outbound capability "
+                        f"but no destination policy configured."
+                    )
+
+            # Filesystem-write tool without path policy
+            if caps.filesystem_write or caps.filesystem_delete:
+                path_policy = self._config.get_path_policy(tool.server, tool.name)
+                if not path_policy:
+                    warnings.append(
+                        f"Tool '{tool.name}' on '{tool.server}' has filesystem-write "
+                        f"capability but no path policy configured."
+                    )
+
+            # Messaging tool without recipient policy
+            if caps.external_messaging:
+                recip_policy = self._config.get_recipient_policy(tool.server, tool.name)
+                if not recip_policy:
+                    warnings.append(
+                        f"Tool '{tool.name}' on '{tool.server}' has messaging capability "
+                        f"but no recipient policy configured."
+                    )
+
+            # Destructive tool not explicitly classified
+            if caps.destructive and tool.classification != ActionClass.DESTRUCTIVE:
+                warnings.append(
+                    f"Tool '{tool.name}' on '{tool.server}' has destructive capability "
+                    f"but is classified as {tool.classification.value} (not DESTRUCTIVE)."
+                )
+
+            # Credential access in non-sandboxed mode
+            if caps.credential_access and mode == DeploymentMode.LOCAL_DEV:
+                warnings.append(
+                    f"Tool '{tool.name}' on '{tool.server}' has credential access "
+                    f"in local_dev deployment mode. Consider sandboxed or high_consequence."
+                )
+
+        # High-consequence deployment mode: required assertions
+        if mode == DeploymentMode.HIGH_CONSEQUENCE:
+            if not self._security.require_network_egress_controls:
+                raise ConfigError(
+                    "deployment_mode='high_consequence' requires "
+                    "require_network_egress_controls=True"
+                )
+            if not self._security.require_filesystem_sandbox:
+                raise ConfigError(
+                    "deployment_mode='high_consequence' requires "
+                    "require_filesystem_sandbox=True"
+                )
+
+        for w in warnings:
+            logger.warning("Deployment check: %s", w)
+
+        return warnings
+
     def _make_approved_tool(
         self, server_name: str, tool: ToolSchema, san_result: SanitizationResult,
     ) -> ApprovedTool:
@@ -1736,19 +1868,39 @@ class SecurityGateway:
                     scan_result.blocked_integrity.append((server_name, tool.name))
                     continue
 
+                # Profile requirements check (PR 16) — before approval decision
+                profile_candidate = self._make_approved_tool(server_name, tool, san_result)
+                profile_error = self._check_profile_requirements(
+                    server_name, tool.name, profile_candidate,
+                )
+                if profile_error:
+                    self._tool_states[tool_key] = ToolState.BLOCKED_SANITIZATION
+                    self._audit.log_event(
+                        AuditEventType.TOOL_BLOCKED,
+                        server=server_name,
+                        tool=tool.name,
+                        reason=f"Profile requirement: {profile_error}",
+                    )
+                    logger.warning(
+                        "BLOCKED tool '%s' on '%s': %s",
+                        tool.name, server_name, profile_error,
+                    )
+                    scan_result.blocked_sanitization.append((server_name, tool.name))
+                    continue
+
                 # First-seen vs known-hash-match decision
                 if self._registry.is_known(server_name, tool.name):
                     # Known tool, hash matches (integrity check passed above)
                     self._tool_states[tool_key] = ToolState.APPROVED
                     self._registry.touch(tool)  # update last_seen_at (idempotent)
-                    approved_tool = self._make_approved_tool(server_name, tool, san_result)
+                    approved_tool = profile_candidate
                     approved_for_server.append(approved_tool)
                     self._approved_tools[approved_tool.namespaced_name] = approved_tool
 
                 elif self._security.auto_approve_first_seen:
                     # Config: auto-approve first-seen (dev/test mode)
                     self._tool_states[tool_key] = ToolState.APPROVED
-                    approved_tool = self._make_approved_tool(server_name, tool, san_result)
+                    approved_tool = profile_candidate
                     self._registry.approve(
                         tool,
                         mode=ApprovalMode.AUTO_APPROVED,
@@ -1764,7 +1916,7 @@ class SecurityGateway:
                 elif not self._security.require_first_run_approval:
                     # Config: legacy mode — first-seen tools auto-approved
                     self._tool_states[tool_key] = ToolState.APPROVED
-                    approved_tool = self._make_approved_tool(server_name, tool, san_result)
+                    approved_tool = profile_candidate
                     self._registry.approve(
                         tool,
                         mode=ApprovalMode.AUTO_APPROVED,
@@ -1805,6 +1957,9 @@ class SecurityGateway:
         # Resolve pending tools via callback (if set)
         if self._pending_tools and self._approval_callback:
             await self._resolve_pending_approvals(scan_result)
+
+        # Deployment validation (PR 17) — runs after all tools are processed
+        self.validate_deployment()
 
         return scan_result
 

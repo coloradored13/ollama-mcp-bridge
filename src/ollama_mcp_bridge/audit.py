@@ -121,6 +121,11 @@ class AuditLogger:
         duration_ms: float = 0.0,
         model_id: str = "",
         turn: int = 0,
+        capability_manifest: dict | None = None,
+        sink_type: str = "",
+        taint_summary: str = "",
+        deployment_mode: str = "",
+        security_profile: str = "",
     ) -> None:
         """Log a tool call event with computed hashes."""
         params_json = json.dumps(params, sort_keys=True, default=str)
@@ -148,6 +153,11 @@ class AuditLogger:
             duration_ms=duration_ms,
             model_id=model_id,
             turn=turn,
+            capability_manifest=capability_manifest or {},
+            sink_type=sink_type,
+            taint_summary=taint_summary,
+            deployment_mode=deployment_mode,
+            security_profile=security_profile,
         ))
 
     def log_event(
@@ -160,6 +170,13 @@ class AuditLogger:
         approval_mode: str = "",
         definition_hash: str = "",
         confirmation_outcome: str = "",
+        capability_manifest: dict | None = None,
+        sink_type: str = "",
+        adapter_decisions: list[str] | None = None,
+        taint_summary: str = "",
+        deployment_mode: str = "",
+        security_profile: str = "",
+        decision_basis: str = "",
     ) -> None:
         """Log a non-tool-call event with optional enrichment fields."""
         self.log(AuditEntry(
@@ -171,6 +188,13 @@ class AuditLogger:
             approval_mode=approval_mode,
             definition_hash=definition_hash,
             confirmation_outcome=confirmation_outcome,
+            capability_manifest=capability_manifest or {},
+            sink_type=sink_type,
+            adapter_decisions=adapter_decisions or [],
+            taint_summary=taint_summary,
+            deployment_mode=deployment_mode,
+            security_profile=security_profile,
+            decision_basis=decision_basis,
         ))
 
     def flush(self) -> None:

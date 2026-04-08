@@ -1360,3 +1360,327 @@ class TestResultSanitizerWithAssessment:
         sanitized, tier = self.sanitizer.sanitize(content)
         assert tier == ResultSanitizationTier.CLEAN
         assert "[TOOL RESULT" in sanitized
+
+
+# --- SecurityProfile enforcement tests ---
+
+
+from ollama_mcp_bridge.config import SecurityProfile, DeploymentMode
+from ollama_mcp_bridge.security import SecurityGateway
+from ollama_mcp_bridge.types import CapabilitySource, ToolCapabilityManifest
+
+
+_BASIC_SCHEMA = {
+    "type": "object",
+    "properties": {"input": {"type": "string"}},
+    "required": ["input"],
+}
+
+
+def _make_approved(
+    name: str = "test_tool",
+    server: str = "test-server",
+    classification: ActionClass = ActionClass.WRITE,
+    capabilities: ToolCapabilityManifest | None = None,
+) -> ApprovedTool:
+    if capabilities is None:
+        capabilities = ToolCapabilityManifest()
+    return ApprovedTool(
+        server=server,
+        name=name,
+        description="Test tool",
+        input_schema=_BASIC_SCHEMA,
+        classification=classification,
+        definition_hash="abc123",
+        capabilities=capabilities,
+    )
+
+
+class TestCheckProfileRequirements:
+    """Tests for SecurityGateway._check_profile_requirements."""
+
+    def _make_gateway(self, profile: str = "standard") -> SecurityGateway:
+        """Create a minimal SecurityGateway for profile testing."""
+        from ollama_mcp_bridge.config import BridgeConfig
+        from unittest.mock import MagicMock
+
+        config = BridgeConfig(
+            security=SecurityConfig(
+                security_profile=profile,
+                require_first_run_approval=True,
+                auto_approve_first_seen=False,
+            ),
+        )
+        gw = SecurityGateway.__new__(SecurityGateway)
+        gw._config = config
+        gw._security = config.security
+        gw._audit = MagicMock()
+        gw._approved_tools = {}
+        return gw
+
+    def test_standard_profile_allows_everything(self):
+        gw = self._make_gateway("standard")
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(
+                outbound_data_transfer=True, source=CapabilitySource.INFERRED,
+            ),
+        )
+        result = gw._check_profile_requirements("test-server", "test_tool", tool)
+        assert result is None
+
+    def test_high_consequence_blocks_inferred_dangerous(self):
+        gw = self._make_gateway("high_consequence")
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(
+                outbound_data_transfer=True, source=CapabilitySource.INFERRED,
+            ),
+        )
+        result = gw._check_profile_requirements("test-server", "test_tool", tool)
+        assert result is not None
+        assert "explicit capability manifest" in result
+
+    def test_high_consequence_allows_explicit_dangerous(self):
+        gw = self._make_gateway("high_consequence")
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(
+                outbound_data_transfer=True, source=CapabilitySource.CONFIG,
+            ),
+        )
+        # Still blocked because no destination policy
+        result = gw._check_profile_requirements("test-server", "test_tool", tool)
+        assert result is not None
+        assert "destination policy" in result
+
+    def test_high_consequence_blocks_fs_write_without_path_policy(self):
+        gw = self._make_gateway("high_consequence")
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(
+                filesystem_write=True, source=CapabilitySource.CONFIG,
+            ),
+        )
+        result = gw._check_profile_requirements("test-server", "test_tool", tool)
+        assert result is not None
+        assert "path policy" in result
+
+    def test_high_consequence_blocks_messaging_without_recipient_policy(self):
+        """Messaging-only tool (not outbound) blocked for missing recipient policy."""
+        from ollama_mcp_bridge.types import DestinationPolicy
+        gw = self._make_gateway("high_consequence")
+        # external_messaging implies has_outbound_capability, so add a destination
+        # policy to satisfy that check and isolate recipient policy check
+        gw._config = gw._config.model_copy(update={
+            "destinations": {"test-server": {"test_tool": [DestinationPolicy(host="allowed.com")]}},
+        })
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(
+                external_messaging=True, source=CapabilitySource.CONFIG,
+            ),
+        )
+        result = gw._check_profile_requirements("test-server", "test_tool", tool)
+        assert result is not None
+        assert "recipient policy" in result
+
+    def test_high_consequence_blocks_memory_write(self):
+        gw = self._make_gateway("high_consequence")
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(
+                memory_write=True, source=CapabilitySource.CONFIG,
+            ),
+        )
+        result = gw._check_profile_requirements("test-server", "test_tool", tool)
+        assert result is not None
+        assert "memory-write" in result
+
+    def test_high_consequence_allows_safe_tool(self):
+        gw = self._make_gateway("high_consequence")
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(
+                filesystem_read=True, source=CapabilitySource.CONFIG,
+            ),
+        )
+        result = gw._check_profile_requirements("test-server", "test_tool", tool)
+        assert result is None
+
+    def test_compat_profile_allows_everything(self):
+        gw = self._make_gateway("compat")
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(
+                outbound_data_transfer=True, destructive=True,
+                source=CapabilitySource.INFERRED,
+            ),
+        )
+        result = gw._check_profile_requirements("test-server", "test_tool", tool)
+        assert result is None
+
+
+class TestValidateDeployment:
+    """Tests for SecurityGateway.validate_deployment."""
+
+    def _make_gateway(
+        self, deployment_mode: str = "local_dev", **security_kwargs,
+    ) -> SecurityGateway:
+        from ollama_mcp_bridge.config import BridgeConfig
+        from unittest.mock import MagicMock
+
+        config = BridgeConfig(
+            security=SecurityConfig(
+                deployment_mode=deployment_mode,
+                **security_kwargs,
+            ),
+        )
+        gw = SecurityGateway.__new__(SecurityGateway)
+        gw._config = config
+        gw._security = config.security
+        gw._audit = MagicMock()
+        gw._approved_tools = {}
+        return gw
+
+    def test_no_tools_no_warnings(self):
+        gw = self._make_gateway()
+        warnings = gw.validate_deployment()
+        assert warnings == []
+
+    def test_outbound_tool_without_policy_warns(self):
+        gw = self._make_gateway()
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(outbound_data_transfer=True),
+        )
+        gw._approved_tools[tool.namespaced_name] = tool
+        warnings = gw.validate_deployment()
+        assert any("outbound" in w and "destination policy" in w for w in warnings)
+
+    def test_fs_write_without_path_policy_warns(self):
+        gw = self._make_gateway()
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(filesystem_write=True),
+        )
+        gw._approved_tools[tool.namespaced_name] = tool
+        warnings = gw.validate_deployment()
+        assert any("filesystem-write" in w and "path policy" in w for w in warnings)
+
+    def test_messaging_without_recipient_policy_warns(self):
+        gw = self._make_gateway()
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(external_messaging=True),
+        )
+        gw._approved_tools[tool.namespaced_name] = tool
+        warnings = gw.validate_deployment()
+        assert any("messaging" in w and "recipient policy" in w for w in warnings)
+
+    def test_destructive_cap_but_write_class_warns(self):
+        gw = self._make_gateway()
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(destructive=True),
+            classification=ActionClass.WRITE,
+        )
+        gw._approved_tools[tool.namespaced_name] = tool
+        warnings = gw.validate_deployment()
+        assert any("destructive" in w and "WRITE" in w for w in warnings)
+
+    def test_credential_in_local_dev_warns(self):
+        gw = self._make_gateway(deployment_mode="local_dev")
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(credential_access=True),
+        )
+        gw._approved_tools[tool.namespaced_name] = tool
+        warnings = gw.validate_deployment()
+        assert any("credential" in w for w in warnings)
+
+    def test_high_consequence_requires_assertions(self):
+        """high_consequence deployment mode requires egress + sandbox assertions."""
+        from ollama_mcp_bridge.errors import ConfigError
+
+        gw = self._make_gateway(deployment_mode="high_consequence")
+        with pytest.raises(ConfigError, match="require_network_egress_controls"):
+            gw.validate_deployment()
+
+    def test_high_consequence_passes_with_assertions(self):
+        gw = self._make_gateway(
+            deployment_mode="high_consequence",
+            require_network_egress_controls=True,
+            require_filesystem_sandbox=True,
+        )
+        warnings = gw.validate_deployment()
+        # May have other warnings but shouldn't raise
+        assert isinstance(warnings, list)
+
+
+# --- Audit enrichment tests ---
+
+
+from ollama_mcp_bridge.types import AuditEntry, AuditEventType
+
+
+class TestAuditForensicFields:
+    """Tests for PR 18 forensic enrichment fields on AuditEntry."""
+
+    def test_audit_entry_has_forensic_fields(self):
+        entry = AuditEntry(event_type=AuditEventType.TOOL_CALL)
+        assert entry.capability_manifest == {}
+        assert entry.sink_type == ""
+        assert entry.destination_match == ""
+        assert entry.adapter_decisions == []
+        assert entry.taint_summary == ""
+        assert entry.deployment_mode == ""
+        assert entry.security_profile == ""
+        assert entry.decision_basis == ""
+
+    def test_audit_entry_accepts_forensic_data(self):
+        entry = AuditEntry(
+            event_type=AuditEventType.TOOL_CALL,
+            capability_manifest={"outbound_data_transfer": True, "source": "config"},
+            sink_type="outbound",
+            taint_summary="tainted: url from search:web (confidence=0.9)",
+            deployment_mode="sandboxed",
+            security_profile="hardened",
+            decision_basis="explicit_policy",
+            adapter_decisions=["safe_url: PASS", "safe_path: PASS"],
+        )
+        assert entry.capability_manifest["outbound_data_transfer"] is True
+        assert entry.sink_type == "outbound"
+        assert entry.deployment_mode == "sandboxed"
+        assert entry.security_profile == "hardened"
+        assert len(entry.adapter_decisions) == 2
+
+    def test_audit_logger_log_event_accepts_forensic_fields(self):
+        """AuditLogger.log_event passes forensic fields through."""
+        from ollama_mcp_bridge.audit import AuditLogger
+
+        logger = AuditLogger()  # in-memory only
+        logger.log_event(
+            AuditEventType.TOOL_BLOCKED,
+            server="test-server",
+            tool="test_tool",
+            reason="Blocked by profile",
+            capability_manifest={"destructive": True},
+            sink_type="destructive",
+            security_profile="high_consequence",
+            decision_basis="profile_requirement",
+        )
+        entries = logger.get_session_entries()
+        assert len(entries) == 1
+        assert entries[0].capability_manifest == {"destructive": True}
+        assert entries[0].sink_type == "destructive"
+        assert entries[0].security_profile == "high_consequence"
+        assert entries[0].decision_basis == "profile_requirement"
+
+    def test_audit_logger_log_tool_call_accepts_forensic_fields(self):
+        """AuditLogger.log_tool_call passes forensic fields through."""
+        from ollama_mcp_bridge.audit import AuditLogger
+
+        logger = AuditLogger()
+        logger.log_tool_call(
+            server="test-server",
+            tool="send_data",
+            action_class=ActionClass.WRITE,
+            params={"url": "https://example.com"},
+            capability_manifest={"outbound_data_transfer": True},
+            sink_type="outbound",
+            taint_summary="clean",
+            deployment_mode="local_dev",
+            security_profile="standard",
+        )
+        entries = logger.get_session_entries()
+        assert len(entries) == 1
+        assert entries[0].capability_manifest == {"outbound_data_transfer": True}
+        assert entries[0].sink_type == "outbound"

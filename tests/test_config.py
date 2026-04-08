@@ -6,7 +6,9 @@ from pathlib import Path
 
 from ollama_mcp_bridge.config import (
     BridgeConfig,
+    DeploymentMode,
     SecurityConfig,
+    SecurityProfile,
     ServerConfig,
     load_config,
 )
@@ -575,3 +577,117 @@ approved_domains = ["internal.corp"]
         """No recipient config returns None."""
         cfg = BridgeConfig()
         assert cfg.get_recipient_policy("server", "tool") is None
+
+
+# --- SecurityProfile tests ---
+
+
+class TestSecurityProfile:
+    def test_enum_values(self):
+        assert SecurityProfile.COMPAT == "compat"
+        assert SecurityProfile.STANDARD == "standard"
+        assert SecurityProfile.HARDENED == "hardened"
+        assert SecurityProfile.HIGH_CONSEQUENCE == "high_consequence"
+
+    def test_default_is_standard(self):
+        cfg = SecurityConfig()
+        assert cfg.security_profile == SecurityProfile.STANDARD
+
+    def test_compat_profile_allows_anything(self):
+        """Compat profile imposes no extra constraints."""
+        cfg = SecurityConfig(
+            security_profile="compat",
+            require_first_run_approval=False,
+            auto_approve_first_seen=True,
+        )
+        assert cfg.security_profile == SecurityProfile.COMPAT
+
+    def test_hardened_requires_first_run_approval(self):
+        with pytest.raises(Exception, match="require_first_run_approval"):
+            SecurityConfig(
+                security_profile="hardened",
+                require_first_run_approval=False,
+            )
+
+    def test_hardened_forbids_auto_approve(self):
+        with pytest.raises(Exception, match="auto_approve_first_seen"):
+            SecurityConfig(
+                security_profile="hardened",
+                auto_approve_first_seen=True,
+            )
+
+    def test_hardened_accepts_valid_config(self):
+        cfg = SecurityConfig(
+            security_profile="hardened",
+            require_first_run_approval=True,
+            auto_approve_first_seen=False,
+        )
+        assert cfg.security_profile == SecurityProfile.HARDENED
+
+    def test_high_consequence_requires_first_run_approval(self):
+        with pytest.raises(Exception, match="require_first_run_approval"):
+            SecurityConfig(
+                security_profile="high_consequence",
+                require_first_run_approval=False,
+            )
+
+    def test_high_consequence_forbids_auto_approve(self):
+        with pytest.raises(Exception, match="auto_approve_first_seen"):
+            SecurityConfig(
+                security_profile="high_consequence",
+                auto_approve_first_seen=True,
+            )
+
+    def test_high_consequence_accepts_valid_config(self):
+        cfg = SecurityConfig(
+            security_profile="high_consequence",
+            require_first_run_approval=True,
+            auto_approve_first_seen=False,
+        )
+        assert cfg.security_profile == SecurityProfile.HIGH_CONSEQUENCE
+
+    def test_profile_from_toml(self, tmp_path: Path):
+        toml_content = """\
+[security]
+security_profile = "hardened"
+"""
+        config_file = tmp_path / "profile.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        assert cfg.security.security_profile == SecurityProfile.HARDENED
+
+
+# --- DeploymentMode tests ---
+
+
+class TestDeploymentMode:
+    def test_enum_values(self):
+        assert DeploymentMode.LOCAL_DEV == "local_dev"
+        assert DeploymentMode.SANDBOXED == "sandboxed"
+        assert DeploymentMode.HIGH_CONSEQUENCE == "high_consequence"
+
+    def test_default_is_local_dev(self):
+        cfg = SecurityConfig()
+        assert cfg.deployment_mode == DeploymentMode.LOCAL_DEV
+
+    def test_deployment_fields_default(self):
+        cfg = SecurityConfig()
+        assert cfg.require_network_egress_controls is False
+        assert cfg.require_filesystem_sandbox is False
+        assert cfg.require_secret_scoping is False
+
+    def test_deployment_from_toml(self, tmp_path: Path):
+        toml_content = """\
+[security]
+deployment_mode = "sandboxed"
+require_network_egress_controls = true
+require_filesystem_sandbox = true
+"""
+        config_file = tmp_path / "deploy.toml"
+        config_file.write_text(toml_content)
+
+        cfg = load_config(config_file)
+        assert cfg.security.deployment_mode == DeploymentMode.SANDBOXED
+        assert cfg.security.require_network_egress_controls is True
+        assert cfg.security.require_filesystem_sandbox is True
