@@ -30,7 +30,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .errors import ConfigError
-from .types import ActionClass, CapabilitySource, DestinationPolicy, PathPolicy, ToolCapabilityManifest
+from .types import ActionClass, CapabilitySource, DestinationPolicy, PathPolicy, RecipientPolicy, ToolCapabilityManifest
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +148,7 @@ class BridgeConfig(BaseModel):
     capabilities: dict[str, dict[str, ToolCapabilityManifest]] = Field(default_factory=dict)
     destinations: dict[str, dict[str, list[DestinationPolicy]]] = Field(default_factory=dict)
     paths: dict[str, dict[str, PathPolicy]] = Field(default_factory=dict)
+    recipients: dict[str, dict[str, RecipientPolicy]] = Field(default_factory=dict)
 
     @field_validator("ollama_host")
     @classmethod
@@ -262,6 +263,26 @@ class BridgeConfig(BaseModel):
         global_paths = self.paths.get("_global", {})
         return global_paths.get("_all")
 
+    def get_recipient_policy(self, server: str, tool: str) -> RecipientPolicy | None:
+        """Look up recipient policy for a server+tool pair.
+
+        Returns tool-specific policy, then server-wide policy (_all), then
+        global policy (_global._all), or None if no policy configured.
+        """
+        server_recipients = self.recipients.get(server, {})
+        policy = server_recipients.get(tool)
+        if policy:
+            return policy
+
+        # Server-wide fallback
+        policy = server_recipients.get("_all")
+        if policy:
+            return policy
+
+        # Global fallback (from approved_recipients backward compat)
+        global_recipients = self.recipients.get("_global", {})
+        return global_recipients.get("_all")
+
 
 def load_config(path: str | Path) -> BridgeConfig:
     """Load bridge configuration from a TOML file.
@@ -293,6 +314,7 @@ def load_config(path: str | Path) -> BridgeConfig:
     capabilities_raw = raw.get("capabilities", {})
     destinations_raw = raw.get("destinations", {})
     paths_raw = raw.get("paths", {})
+    recipients_raw = raw.get("recipients", {})
 
     try:
         servers = {name: ServerConfig(**cfg) for name, cfg in servers_raw.items()}
@@ -357,6 +379,21 @@ def load_config(path: str | Path) -> BridgeConfig:
                     )
                 paths[server_name][tool_name] = PathPolicy(**path_fields)
 
+        # Parse [recipients.<server>.<tool>] sections
+        recipients: dict[str, dict[str, RecipientPolicy]] = {}
+        for server_name, tools in recipients_raw.items():
+            if not isinstance(tools, dict):
+                raise ConfigError(
+                    f"recipients.{server_name} must be a table of tool configs"
+                )
+            recipients[server_name] = {}
+            for tool_name, recip_fields in tools.items():
+                if not isinstance(recip_fields, dict):
+                    raise ConfigError(
+                        f"recipients.{server_name}.{tool_name} must be a table"
+                    )
+                recipients[server_name][tool_name] = RecipientPolicy(**recip_fields)
+
         # Auto-convert allowed_path_roots to global path policy
         if security.allowed_path_roots:
             logger.info(
@@ -368,6 +405,17 @@ def load_config(path: str | Path) -> BridgeConfig:
                 allowed_roots=security.allowed_path_roots,
                 allow_relative_paths=False,
                 normalize_symlinks=True,
+            )
+
+        # Auto-convert approved_recipients to global recipient policy
+        if security.approved_recipients:
+            logger.info(
+                "Converting approved_recipients to recipient policy "
+                "(backward compatibility). Consider migrating to "
+                "[recipients.<server>.<tool>] for finer control."
+            )
+            recipients.setdefault("_global", {})["_all"] = RecipientPolicy(
+                approved_addresses=security.approved_recipients,
             )
 
         # Auto-convert allowed_outbound_domains to global destination policies
@@ -399,6 +447,7 @@ def load_config(path: str | Path) -> BridgeConfig:
             capabilities=capabilities,
             destinations=destinations,
             paths=paths,
+            recipients=recipients,
         )
     except ConfigError:
         raise

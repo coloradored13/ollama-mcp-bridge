@@ -33,7 +33,7 @@ from urllib.parse import urlparse
 
 from .config import SecurityConfig
 from .sink_policy import _extract_values_from_args, _is_memory_write_tool
-from .types import ApprovedTool, DestinationPolicy, PathPolicy
+from .types import ApprovedTool, DestinationPolicy, PathPolicy, RecipientPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -264,10 +264,13 @@ class SafePath:
 
 
 class SafeRecipient:
-    """Validates email recipients in tool arguments against approved list.
+    """Validates email recipients in tool arguments against recipient policies.
 
-    Active when: approved_recipients is non-empty.
-    Checks: all email addresses found in args must be in the approved list.
+    Active when: a RecipientPolicy is provided, OR approved_recipients is non-empty.
+
+    When a RecipientPolicy is provided, validates each email against the full
+    policy (exact addresses, domain-level approval, identity groups, internal-only
+    mode). Falls back to flat list checking when only approved_recipients is configured.
     """
 
     name = "safe_recipient"
@@ -277,7 +280,13 @@ class SafeRecipient:
         tool: ApprovedTool,
         args: dict[str, Any],
         config: SecurityConfig,
+        recipient_policy: RecipientPolicy | None = None,
     ) -> list[str]:
+        # RecipientPolicy takes precedence (PR 15 path)
+        if recipient_policy:
+            return self._check_recipient_policy(tool, args, recipient_policy)
+
+        # Legacy path: use approved_recipients
         if not config.approved_recipients:
             return []
 
@@ -295,6 +304,36 @@ class SafeRecipient:
                 errors.append(
                     f"[{self.name}] Field '{field_name}': recipient "
                     f"'{ev.value}' not in approved_recipients"
+                )
+
+        return errors
+
+    def _check_recipient_policy(
+        self,
+        tool: ApprovedTool,
+        args: dict[str, Any],
+        policy: RecipientPolicy,
+    ) -> list[str]:
+        """Validate all email recipients in args against a RecipientPolicy."""
+        errors: list[str] = []
+        entries = _extract_values_from_args(args)
+
+        for field_name, ev in entries:
+            if ev.kind != "email":
+                continue
+
+            # Internal-only mode: must match policy, no exceptions
+            if policy.internal_only and not policy.has_any_policy:
+                errors.append(
+                    f"[{self.name}] Field '{field_name}': internal_only mode "
+                    f"is active but no approved addresses/domains configured"
+                )
+                continue
+
+            result = policy.validate_recipient(ev.value)
+            if not result.matched:
+                errors.append(
+                    f"[{self.name}] Field '{field_name}': {result.failure_reason}"
                 )
 
         return errors
@@ -369,6 +408,7 @@ def run_adapters(
     config: SecurityConfig,
     destination_policies: list[DestinationPolicy] | None = None,
     path_policy: PathPolicy | None = None,
+    recipient_policy: RecipientPolicy | None = None,
 ) -> list[str]:
     """Run all safe adapters against a tool call's arguments.
 
@@ -381,6 +421,8 @@ def run_adapters(
             errors.extend(adapter.check(tool, args, config, destination_policies))
         elif isinstance(adapter, SafePath):
             errors.extend(adapter.check(tool, args, config, path_policy))
+        elif isinstance(adapter, SafeRecipient):
+            errors.extend(adapter.check(tool, args, config, recipient_policy))
         else:
             errors.extend(adapter.check(tool, args, config))
     return errors
