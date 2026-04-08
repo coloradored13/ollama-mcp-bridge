@@ -33,7 +33,7 @@ from urllib.parse import urlparse
 
 from .config import SecurityConfig
 from .sink_policy import _extract_values_from_args, _is_memory_write_tool
-from .types import ApprovedTool
+from .types import ApprovedTool, DestinationPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -92,11 +92,14 @@ def _extract_paths_from_args(
 
 
 class SafeURL:
-    """Validates URLs in tool arguments against allowed domain list.
+    """Validates URLs in tool arguments against destination policies or domain list.
 
-    Active when: allowed_outbound_domains is non-empty.
-    Checks: all URLs extracted from args must have a domain that matches
-    one of the allowed domains (exact or subdomain match).
+    Active when: destination_policies are provided, OR allowed_outbound_domains
+    is non-empty, OR require_destination_policy_for_outbound is True.
+
+    When destination policies exist, validates each URL against the full policy
+    (scheme, host, port, path, IP controls). Falls back to domain-only checking
+    when only allowed_outbound_domains is configured.
     """
 
     name = "safe_url"
@@ -106,7 +109,24 @@ class SafeURL:
         tool: ApprovedTool,
         args: dict[str, Any],
         config: SecurityConfig,
+        destination_policies: list[DestinationPolicy] | None = None,
     ) -> list[str]:
+        # Destination policies take precedence (PR 11 path)
+        if destination_policies:
+            return self._check_destination_policies(args, destination_policies)
+
+        # Require flag with no policies — block outbound tools with URLs
+        if config.require_destination_policy_for_outbound:
+            entries = _extract_values_from_args(args)
+            urls = [ev for _, ev in entries if ev.kind == "url"]
+            if urls and tool.capabilities.has_outbound_capability:
+                return [
+                    f"[{self.name}] Tool '{tool.name}' has outbound capability "
+                    f"but no destination policy configured "
+                    f"(require_destination_policy_for_outbound=True)"
+                ]
+
+        # Legacy path: use allowed_outbound_domains
         if not config.allowed_outbound_domains:
             return []
 
@@ -139,6 +159,31 @@ class SafeURL:
                     f"[{self.name}] Field '{field_name}': domain '{host}' "
                     f"not in allowed_outbound_domains "
                     f"({', '.join(config.allowed_outbound_domains)})"
+                )
+
+        return errors
+
+    def _check_destination_policies(
+        self,
+        args: dict[str, Any],
+        policies: list[DestinationPolicy],
+    ) -> list[str]:
+        """Validate all URLs in args against destination policies."""
+        errors: list[str] = []
+        entries = _extract_values_from_args(args)
+
+        for field_name, ev in entries:
+            if ev.kind != "url":
+                continue
+
+            match_results = [p.matches(ev.value) for p in policies]
+            if not any(r.matched for r in match_results):
+                # Pick the most informative failure reason
+                reasons = [r.failure_reason for r in match_results if r.failure_reason]
+                reason_hint = f" ({reasons[0]})" if reasons else ""
+                errors.append(
+                    f"[{self.name}] Field '{field_name}': URL '{ev.value[:80]}' "
+                    f"does not match any destination policy{reason_hint}"
                 )
 
         return errors
@@ -296,6 +341,7 @@ def run_adapters(
     tool: ApprovedTool,
     args: dict[str, Any],
     config: SecurityConfig,
+    destination_policies: list[DestinationPolicy] | None = None,
 ) -> list[str]:
     """Run all safe adapters against a tool call's arguments.
 
@@ -304,5 +350,8 @@ def run_adapters(
     """
     errors: list[str] = []
     for adapter in _get_adapters():
-        errors.extend(adapter.check(tool, args, config))
+        if isinstance(adapter, SafeURL):
+            errors.extend(adapter.check(tool, args, config, destination_policies))
+        else:
+            errors.extend(adapter.check(tool, args, config))
     return errors

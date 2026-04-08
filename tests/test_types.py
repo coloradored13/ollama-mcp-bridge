@@ -1,5 +1,6 @@
 """Tests for types.py — shared data types."""
 
+import pytest
 from datetime import datetime
 
 from ollama_mcp_bridge.types import (
@@ -227,3 +228,168 @@ class TestExecutionResultWithProvenance:
         r = ExecutionResult(content="result")
         assert r.provenance is None
         assert r.risk_assessment is None
+
+
+# --- DestinationPolicy tests ---
+
+
+from ollama_mcp_bridge.types import DestinationMatchResult, DestinationPolicy
+
+
+class TestDestinationPolicy:
+    def test_matches_exact_host(self):
+        policy = DestinationPolicy(host="api.example.com")
+        result = policy.matches("https://api.example.com/v1")
+        assert result.matched is True
+
+    def test_rejects_wrong_host(self):
+        policy = DestinationPolicy(host="api.example.com")
+        result = policy.matches("https://other.com/v1")
+        assert result.matched is False
+        assert "host" in result.failure_reason
+
+    def test_allows_subdomain_when_enabled(self):
+        policy = DestinationPolicy(host="example.com", allow_subdomains=True)
+        result = policy.matches("https://sub.example.com/api")
+        assert result.matched is True
+
+    def test_rejects_subdomain_when_disabled(self):
+        policy = DestinationPolicy(host="example.com", allow_subdomains=False)
+        result = policy.matches("https://sub.example.com/api")
+        assert result.matched is False
+        assert "subdomains not allowed" in result.failure_reason
+
+    def test_rejects_wrong_scheme(self):
+        policy = DestinationPolicy(host="api.example.com", scheme="https")
+        result = policy.matches("http://api.example.com/v1")
+        assert result.matched is False
+        assert "scheme" in result.failure_reason
+
+    def test_allows_matching_scheme(self):
+        policy = DestinationPolicy(host="api.example.com", scheme="http")
+        result = policy.matches("http://api.example.com/v1")
+        assert result.matched is True
+
+    def test_matches_port(self):
+        policy = DestinationPolicy(host="api.example.com", port=8443)
+        result = policy.matches("https://api.example.com:8443/v1")
+        assert result.matched is True
+
+    def test_rejects_wrong_port(self):
+        policy = DestinationPolicy(host="api.example.com", port=8443)
+        result = policy.matches("https://api.example.com:9999/v1")
+        assert result.matched is False
+        assert "port" in result.failure_reason
+
+    def test_default_port_inferred(self):
+        """URL without explicit port uses default 443 for https."""
+        policy = DestinationPolicy(host="api.example.com", port=443)
+        result = policy.matches("https://api.example.com/v1")
+        assert result.matched is True
+
+    def test_default_port_http(self):
+        """URL without explicit port uses default 80 for http."""
+        policy = DestinationPolicy(host="api.example.com", scheme="http", port=80)
+        result = policy.matches("http://api.example.com/v1")
+        assert result.matched is True
+
+    def test_path_prefix_match(self):
+        policy = DestinationPolicy(
+            host="api.example.com", path_prefixes=["/v1/", "/v2/"],
+        )
+        result = policy.matches("https://api.example.com/v1/users")
+        assert result.matched is True
+
+    def test_path_prefix_no_match(self):
+        policy = DestinationPolicy(
+            host="api.example.com", path_prefixes=["/v1/"],
+        )
+        result = policy.matches("https://api.example.com/admin/users")
+        assert result.matched is False
+        assert "path" in result.failure_reason
+
+    def test_empty_path_prefixes_allows_any(self):
+        policy = DestinationPolicy(host="api.example.com")
+        result = policy.matches("https://api.example.com/anything/here")
+        assert result.matched is True
+
+    def test_ip_literal_rejected_by_default(self):
+        policy = DestinationPolicy(host="192.168.1.1")
+        result = policy.matches("https://192.168.1.1/api")
+        assert result.matched is False
+        assert "IP literal" in result.failure_reason
+
+    def test_ip_literal_allowed_when_enabled(self):
+        policy = DestinationPolicy(
+            host="8.8.8.8", allow_ip_literals=True, allow_private_ranges=True,
+        )
+        result = policy.matches("https://8.8.8.8/dns")
+        assert result.matched is True
+
+    def test_private_range_rejected(self):
+        policy = DestinationPolicy(
+            host="192.168.1.1", allow_ip_literals=True, allow_private_ranges=False,
+        )
+        result = policy.matches("https://192.168.1.1/api")
+        assert result.matched is False
+        assert "private" in result.failure_reason
+
+    def test_private_range_allowed(self):
+        policy = DestinationPolicy(
+            host="192.168.1.1", allow_ip_literals=True, allow_private_ranges=True,
+        )
+        result = policy.matches("https://192.168.1.1/api")
+        assert result.matched is True
+
+    def test_frozen_model(self):
+        policy = DestinationPolicy(host="example.com")
+        with pytest.raises(Exception):
+            policy.host = "other.com"
+
+    def test_defaults(self):
+        policy = DestinationPolicy(host="example.com")
+        assert policy.scheme == "https"
+        assert policy.port is None
+        assert policy.path_prefixes == []
+        assert policy.allow_subdomains is False
+        assert policy.allow_ip_literals is False
+        assert policy.allow_private_ranges is False
+        assert policy.allow_redirects is False
+        assert policy.allowed_methods == []
+        assert policy.max_payload_bytes == 65536
+
+    def test_malformed_url(self):
+        policy = DestinationPolicy(host="example.com")
+        result = policy.matches("not a url at all")
+        assert result.matched is False
+
+    def test_url_no_hostname(self):
+        policy = DestinationPolicy(host="example.com")
+        result = policy.matches("https:///path")
+        assert result.matched is False
+        assert "no hostname" in result.failure_reason
+
+    def test_case_insensitive_host(self):
+        policy = DestinationPolicy(host="API.Example.COM")
+        result = policy.matches("https://api.example.com/v1")
+        assert result.matched is True
+
+    def test_case_insensitive_scheme(self):
+        policy = DestinationPolicy(host="example.com", scheme="HTTPS")
+        result = policy.matches("https://example.com/v1")
+        assert result.matched is True
+
+
+class TestDestinationMatchResult:
+    def test_default_not_matched(self):
+        r = DestinationMatchResult()
+        assert r.matched is False
+        assert r.failure_reason == ""
+
+    def test_matched_result(self):
+        r = DestinationMatchResult(
+            matched=True, policy_host="example.com",
+            checked_url="https://example.com/v1",
+        )
+        assert r.matched is True
+        assert r.policy_host == "example.com"

