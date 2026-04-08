@@ -527,3 +527,139 @@ class TestSafeURLDestinationPolicies:
             destination_policies=None,
         )
         assert errors == []
+
+
+# --- SafePath PathPolicy tests ---
+
+
+from ollama_mcp_bridge.types import PathPolicy, ToolCapabilityManifest
+
+
+class TestSafePathWithPathPolicy:
+    """Tests for PR 14 PathPolicy support in SafePath adapter."""
+
+    def setup_method(self):
+        self.adapter = SafePath()
+        self.tool = _make_tool()
+        self.config = SecurityConfig()
+
+    def test_path_matching_policy_passes(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        errors = self.adapter.check(
+            self.tool, {"path": "/tmp/sandbox/file.txt"}, self.config,
+            path_policy=policy,
+        )
+        assert errors == []
+
+    def test_path_outside_policy_rejected(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        errors = self.adapter.check(
+            self.tool, {"path": "/etc/passwd"}, self.config,
+            path_policy=policy,
+        )
+        assert len(errors) == 1
+        assert "outside allowed roots" in errors[0]
+
+    def test_traversal_attack_via_policy(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        errors = self.adapter.check(
+            self.tool, {"path": "/tmp/sandbox/../../etc/passwd"}, self.config,
+            path_policy=policy,
+        )
+        assert len(errors) == 1
+        assert "outside allowed roots" in errors[0]
+
+    def test_relative_path_rejected_by_policy(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        errors = self.adapter.check(
+            self.tool, {"path": "../../../etc/shadow"}, self.config,
+            path_policy=policy,
+        )
+        assert len(errors) == 1
+        assert "relative paths not allowed" in errors[0]
+
+    def test_glob_rejected_by_policy(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        errors = self.adapter.check(
+            self.tool, {"path": "/tmp/sandbox/*.txt"}, self.config,
+            path_policy=policy,
+        )
+        assert len(errors) == 1
+        assert "glob patterns not allowed" in errors[0]
+
+    def test_extension_rejected_by_policy(self):
+        policy = PathPolicy(
+            allowed_roots=["/tmp/sandbox"],
+            extensions_allowlist=[".txt", ".md"],
+        )
+        errors = self.adapter.check(
+            self.tool, {"path": "/tmp/sandbox/evil.sh"}, self.config,
+            path_policy=policy,
+        )
+        assert len(errors) == 1
+        assert "extension" in errors[0]
+
+    def test_read_only_blocks_write_tool(self):
+        caps = ToolCapabilityManifest(filesystem_write=True)
+        tool = ApprovedTool(
+            server="test-server", name="write_file",
+            description="Writes files", input_schema=_SCHEMA,
+            classification=ActionClass.WRITE, definition_hash="abc123",
+            capabilities=caps,
+        )
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"], read_only=True)
+        errors = self.adapter.check(
+            tool, {"path": "/tmp/sandbox/file.txt"}, self.config,
+            path_policy=policy,
+        )
+        assert len(errors) == 1
+        assert "read_only" in errors[0]
+
+    def test_multiple_paths_all_checked(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        errors = self.adapter.check(
+            self.tool,
+            {"src": "/tmp/sandbox/ok.txt", "dst": "/etc/evil"},
+            self.config,
+            path_policy=policy,
+        )
+        assert len(errors) == 1
+        assert "/etc/evil" in errors[0] or "outside allowed roots" in errors[0]
+
+    def test_policy_takes_precedence_over_legacy(self):
+        """PathPolicy overrides config.allowed_path_roots."""
+        config = SecurityConfig(allowed_path_roots=["/tmp/legacy"])
+        policy = PathPolicy(allowed_roots=["/tmp/new"])
+        errors = self.adapter.check(
+            self.tool, {"path": "/tmp/new/file.txt"}, config,
+            path_policy=policy,
+        )
+        assert errors == []
+
+    def test_legacy_still_works_without_policy(self):
+        """Without path_policy, falls back to allowed_path_roots."""
+        config = SecurityConfig(allowed_path_roots=["/tmp/sandbox"])
+        errors = self.adapter.check(
+            self.tool, {"path": "/tmp/sandbox/file.txt"}, config,
+            path_policy=None,
+        )
+        assert errors == []
+
+    def test_no_paths_in_args_passes(self):
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        errors = self.adapter.check(
+            self.tool, {"query": "hello world"}, self.config,
+            path_policy=policy,
+        )
+        assert errors == []
+
+    def test_run_adapters_passes_path_policy(self):
+        """run_adapters threads path_policy through to SafePath."""
+        policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
+        errors = run_adapters(
+            self.tool,
+            {"path": "/etc/passwd"},
+            self.config,
+            path_policy=policy,
+        )
+        assert any("outside allowed roots" in e for e in errors)

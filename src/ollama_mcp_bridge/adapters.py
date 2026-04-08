@@ -33,7 +33,7 @@ from urllib.parse import urlparse
 
 from .config import SecurityConfig
 from .sink_policy import _extract_values_from_args, _is_memory_write_tool
-from .types import ApprovedTool, DestinationPolicy
+from .types import ApprovedTool, DestinationPolicy, PathPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -190,13 +190,14 @@ class SafeURL:
 
 
 class SafePath:
-    """Validates file paths in tool arguments against allowed root directories.
+    """Validates file paths in tool arguments against path policies.
 
-    Active when: allowed_path_roots is non-empty.
-    Checks:
-        - Paths must resolve to within an allowed root.
-        - Traversal patterns (../) that escape the root are blocked.
-        - Paths are normalized before comparison.
+    Active when: a PathPolicy is provided, OR allowed_path_roots is non-empty.
+
+    When a PathPolicy is provided, validates each path against the full policy
+    (allowed roots, relative path control, symlink resolution, extension
+    filtering, read/write/delete constraints). Falls back to simple root-based
+    checking when only allowed_path_roots is configured.
     """
 
     name = "safe_path"
@@ -206,7 +207,13 @@ class SafePath:
         tool: ApprovedTool,
         args: dict[str, Any],
         config: SecurityConfig,
+        path_policy: PathPolicy | None = None,
     ) -> list[str]:
+        # PathPolicy takes precedence (PR 14 path)
+        if path_policy:
+            return self._check_path_policy(tool, args, path_policy)
+
+        # Legacy path: use allowed_path_roots
         if not config.allowed_path_roots:
             return []
 
@@ -232,6 +239,25 @@ class SafePath:
                     f"[{self.name}] Field '{field_name}': path '{raw_path}' "
                     f"is outside allowed roots "
                     f"({', '.join(config.allowed_path_roots)})"
+                )
+
+        return errors
+
+    def _check_path_policy(
+        self,
+        tool: ApprovedTool,
+        args: dict[str, Any],
+        policy: PathPolicy,
+    ) -> list[str]:
+        """Validate all paths in args against a PathPolicy."""
+        errors: list[str] = []
+        path_entries = _extract_paths_from_args(args)
+
+        for field_name, raw_path in path_entries:
+            result = policy.validate_path(raw_path, tool.capabilities)
+            if not result.matched:
+                errors.append(
+                    f"[{self.name}] Field '{field_name}': {result.failure_reason}"
                 )
 
         return errors
@@ -342,6 +368,7 @@ def run_adapters(
     args: dict[str, Any],
     config: SecurityConfig,
     destination_policies: list[DestinationPolicy] | None = None,
+    path_policy: PathPolicy | None = None,
 ) -> list[str]:
     """Run all safe adapters against a tool call's arguments.
 
@@ -352,6 +379,8 @@ def run_adapters(
     for adapter in _get_adapters():
         if isinstance(adapter, SafeURL):
             errors.extend(adapter.check(tool, args, config, destination_policies))
+        elif isinstance(adapter, SafePath):
+            errors.extend(adapter.check(tool, args, config, path_policy))
         else:
             errors.extend(adapter.check(tool, args, config))
     return errors

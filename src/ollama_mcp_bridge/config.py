@@ -30,7 +30,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .errors import ConfigError
-from .types import ActionClass, CapabilitySource, DestinationPolicy, ToolCapabilityManifest
+from .types import ActionClass, CapabilitySource, DestinationPolicy, PathPolicy, ToolCapabilityManifest
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +147,7 @@ class BridgeConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     capabilities: dict[str, dict[str, ToolCapabilityManifest]] = Field(default_factory=dict)
     destinations: dict[str, dict[str, list[DestinationPolicy]]] = Field(default_factory=dict)
+    paths: dict[str, dict[str, PathPolicy]] = Field(default_factory=dict)
 
     @field_validator("ollama_host")
     @classmethod
@@ -241,6 +242,26 @@ class BridgeConfig(BaseModel):
 
         return tool_policies + global_policies
 
+    def get_path_policy(self, server: str, tool: str) -> PathPolicy | None:
+        """Look up path policy for a server+tool pair.
+
+        Returns tool-specific policy, then server-wide policy (_all), then
+        global policy (_global._all), or None if no policy configured.
+        """
+        server_paths = self.paths.get(server, {})
+        policy = server_paths.get(tool)
+        if policy:
+            return policy
+
+        # Server-wide fallback
+        policy = server_paths.get("_all")
+        if policy:
+            return policy
+
+        # Global fallback (from allowed_path_roots backward compat)
+        global_paths = self.paths.get("_global", {})
+        return global_paths.get("_all")
+
 
 def load_config(path: str | Path) -> BridgeConfig:
     """Load bridge configuration from a TOML file.
@@ -271,6 +292,7 @@ def load_config(path: str | Path) -> BridgeConfig:
     logging_raw = raw.get("logging", {})
     capabilities_raw = raw.get("capabilities", {})
     destinations_raw = raw.get("destinations", {})
+    paths_raw = raw.get("paths", {})
 
     try:
         servers = {name: ServerConfig(**cfg) for name, cfg in servers_raw.items()}
@@ -320,6 +342,34 @@ def load_config(path: str | Path) -> BridgeConfig:
                         f"must be a table or array of tables"
                     )
 
+        # Parse [paths.<server>.<tool>] sections
+        paths: dict[str, dict[str, PathPolicy]] = {}
+        for server_name, tools in paths_raw.items():
+            if not isinstance(tools, dict):
+                raise ConfigError(
+                    f"paths.{server_name} must be a table of tool configs"
+                )
+            paths[server_name] = {}
+            for tool_name, path_fields in tools.items():
+                if not isinstance(path_fields, dict):
+                    raise ConfigError(
+                        f"paths.{server_name}.{tool_name} must be a table"
+                    )
+                paths[server_name][tool_name] = PathPolicy(**path_fields)
+
+        # Auto-convert allowed_path_roots to global path policy
+        if security.allowed_path_roots:
+            logger.info(
+                "Converting allowed_path_roots to path policy "
+                "(backward compatibility). Consider migrating to "
+                "[paths.<server>.<tool>] for finer control."
+            )
+            paths.setdefault("_global", {})["_all"] = PathPolicy(
+                allowed_roots=security.allowed_path_roots,
+                allow_relative_paths=False,
+                normalize_symlinks=True,
+            )
+
         # Auto-convert allowed_outbound_domains to global destination policies
         if security.allowed_outbound_domains:
             logger.info(
@@ -348,6 +398,7 @@ def load_config(path: str | Path) -> BridgeConfig:
             logging=logging_cfg,
             capabilities=capabilities,
             destinations=destinations,
+            paths=paths,
         )
     except ConfigError:
         raise
