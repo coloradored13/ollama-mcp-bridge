@@ -52,6 +52,22 @@ logger = logging.getLogger(__name__)
 _URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _IP_PATTERN = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
+# Bare hostname: requires at least one dot and a 2+ char TLD-like suffix.
+# Anchored with \b to avoid matching inside URLs (which are caught by _URL_PATTERN first).
+_HOSTNAME_PATTERN = re.compile(
+    r"\b([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"
+    r"\.[a-zA-Z]{2,})\b"
+)
+# host:port — matches IP:port or hostname:port patterns.
+_HOST_PORT_PATTERN = re.compile(r"\b([a-zA-Z0-9][a-zA-Z0-9._-]*:\d{1,5})\b")
+# Arg field names that indicate outbound destination intent.
+_DESTINATION_FIELD_NAMES = frozenset({
+    "host", "hostname", "server", "endpoint", "uri", "url",
+    "base_url", "webhook_url", "webhook", "callback_url",
+    "destination", "target", "target_url", "recipient",
+    "address", "remote", "remote_host",
+})
 
 # Memory-write tool name patterns — uses (?:^|_) and (?:_|$) instead of \b
 # because tool names use underscores (store_memory), and \b treats _ as a word char.
@@ -362,6 +378,22 @@ def _extract_values(text: str) -> list[ExtractedValue]:
             seen.add(ip)
             values.append(ExtractedValue(value=ip, kind="ip"))
 
+    # Host:port patterns (e.g., "10.0.0.1:8080", "api.example.com:443").
+    # Checked before bare hostnames to avoid partial matches.
+    for match in _HOST_PORT_PATTERN.finditer(text):
+        hp = match.group(1)
+        if hp not in seen:
+            seen.add(hp)
+            values.append(ExtractedValue(value=hp, kind="host_port"))
+
+    # Bare hostnames (e.g., "api.example.com" without scheme).
+    # Runs after URL/domain/IP extraction so already-seen values are skipped.
+    for match in _HOSTNAME_PATTERN.finditer(text):
+        hostname = match.group(1)
+        if hostname not in seen:
+            seen.add(hostname)
+            values.append(ExtractedValue(value=hostname, kind="hostname"))
+
     return values
 
 
@@ -434,9 +466,31 @@ def _match_confidence(arg_val: ExtractedValue, tracked_val: ExtractedValue) -> f
 
 
 def _args_contain_outbound_indicators(args: dict[str, Any]) -> bool:
-    """Check if tool arguments contain outbound indicators (URLs, emails)."""
+    """Check if tool arguments contain outbound indicators.
+
+    Detects:
+    - URLs, emails (original)
+    - IPs, bare hostnames, host:port patterns (PR 12)
+    - Destination-indicating field names with non-empty string values (PR 12)
+    """
     entries = _extract_values_from_args(args)
-    return any(ev.kind in ("url", "email") for _, ev in entries)
+    if any(ev.kind in ("url", "email", "ip", "hostname", "host_port") for _, ev in entries):
+        return True
+    return _args_contain_destination_fields(args)
+
+
+def _args_contain_destination_fields(args: dict[str, Any]) -> bool:
+    """Check if arg field names indicate outbound destination intent.
+
+    Catches patterns like send_data(host="evil.com", port=443) where
+    the values alone aren't URLs but the field names reveal outbound intent.
+    Only matches when the value is a non-empty string (int port alone
+    is not sufficient).
+    """
+    for key, value in args.items():
+        if key.lower() in _DESTINATION_FIELD_NAMES and isinstance(value, str) and value:
+            return True
+    return False
 
 
 def _extract_domains_from_args(args: dict[str, Any]) -> list[str]:
