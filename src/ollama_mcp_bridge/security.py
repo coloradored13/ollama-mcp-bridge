@@ -1430,10 +1430,27 @@ class SecurityGateway:
                     reason="not_pending",
                 )
 
-            self._tool_states[tool_key] = ToolState.APPROVED
             approved_tool = self._make_approved_tool(
                 server, original_tool, pending.sanitization_result,
             )
+
+            # Profile check — same enforcement as connect_and_scan (PR 16)
+            profile_error = self._check_profile_requirements(
+                server, tool_name, approved_tool,
+            )
+            if profile_error:
+                self._audit.log_event(
+                    AuditEventType.TOOL_BLOCKED,
+                    server=server,
+                    tool=tool_name,
+                    reason=f"Profile requirement: {profile_error}",
+                )
+                raise ToolBlockedError(
+                    f"Tool '{tool_key}' blocked by security profile: {profile_error}",
+                    reason="profile_requirement",
+                )
+
+            self._tool_states[tool_key] = ToolState.APPROVED
             self._registry.approve(
                 original_tool,
                 mode=ApprovalMode.FIRST_RUN_EXPLICIT,
@@ -1472,10 +1489,26 @@ class SecurityGateway:
                         reason="missing_schema",
                     )
 
-            self._tool_states[tool_key] = ToolState.APPROVED
-
             san_result = self._sanitizer.sanitize(original_tool)
             approved_tool = self._make_approved_tool(server, original_tool, san_result)
+
+            # Profile check — same enforcement as connect_and_scan (PR 16)
+            profile_error = self._check_profile_requirements(
+                server, tool_name, approved_tool,
+            )
+            if profile_error:
+                self._audit.log_event(
+                    AuditEventType.TOOL_BLOCKED,
+                    server=server,
+                    tool=tool_name,
+                    reason=f"Profile requirement: {profile_error}",
+                )
+                raise ToolBlockedError(
+                    f"Tool '{tool_key}' blocked by security profile: {profile_error}",
+                    reason="profile_requirement",
+                )
+
+            self._tool_states[tool_key] = ToolState.APPROVED
             self._registry.approve(
                 original_tool,
                 mode=ApprovalMode.REAPPROVED,
