@@ -233,7 +233,6 @@ allowed_tools = ["send_event"]
 scheme = "https"
 host = "hooks.internal"
 path_prefixes = ["/agent-events"]
-max_payload_bytes = 32768
 """
         config_file = tmp_path / "dest.toml"
         config_file.write_text(toml_content)
@@ -244,7 +243,24 @@ max_payload_bytes = 32768
         assert policies[0].host == "hooks.internal"
         assert policies[0].scheme == "https"
         assert policies[0].path_prefixes == ["/agent-events"]
-        assert policies[0].max_payload_bytes == 32768
+        assert policies[0].max_payload_bytes == 65536  # default value
+
+    def test_max_payload_bytes_nondefault_raises(self, tmp_path: Path):
+        """Non-default max_payload_bytes raises ConfigError (not yet enforced)."""
+        toml_content = """\
+[servers.webhooks]
+command = "echo"
+allowed_tools = ["send_event"]
+
+[[destinations.webhooks.send_event]]
+host = "hooks.internal"
+max_payload_bytes = 32768
+"""
+        config_file = tmp_path / "dest.toml"
+        config_file.write_text(toml_content)
+
+        with pytest.raises((ConfigError, Exception), match="not yet enforced"):
+            load_config(config_file)
 
     def test_multiple_policies_per_tool(self, tmp_path: Path):
         """Multiple [[destinations.server.tool]] entries produce a list."""

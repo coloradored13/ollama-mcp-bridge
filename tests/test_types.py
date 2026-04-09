@@ -358,6 +358,42 @@ class TestDestinationPolicy:
         assert policy.allowed_methods == []
         assert policy.max_payload_bytes == 65536
 
+    def test_dormant_query_constraints_raises(self):
+        """query_constraints is not yet enforced — raises if set."""
+        import pytest
+        from pydantic import ValidationError
+        with pytest.raises((ValidationError, Exception), match="not yet enforced"):
+            DestinationPolicy(host="example.com", query_constraints={"token": "abc"})
+
+    def test_dormant_allow_redirects_raises(self):
+        """allow_redirects=True is not yet enforced — raises if set."""
+        import pytest
+        from pydantic import ValidationError
+        with pytest.raises((ValidationError, Exception), match="not yet enforced"):
+            DestinationPolicy(host="example.com", allow_redirects=True)
+
+    def test_dormant_allowed_methods_raises(self):
+        """allowed_methods is not yet enforced — raises if set."""
+        import pytest
+        from pydantic import ValidationError
+        with pytest.raises((ValidationError, Exception), match="not yet enforced"):
+            DestinationPolicy(host="example.com", allowed_methods=["GET"])
+
+    def test_dormant_max_payload_bytes_raises(self):
+        """Non-default max_payload_bytes is not yet enforced — raises if changed."""
+        import pytest
+        from pydantic import ValidationError
+        with pytest.raises((ValidationError, Exception), match="not yet enforced"):
+            DestinationPolicy(host="example.com", max_payload_bytes=32768)
+
+    def test_dormant_defaults_pass(self):
+        """All dormant fields at their default values pass validation."""
+        policy = DestinationPolicy(host="example.com")
+        assert policy.query_constraints == {}
+        assert policy.allow_redirects is False
+        assert policy.allowed_methods == []
+        assert policy.max_payload_bytes == 65536
+
     def test_malformed_url(self):
         policy = DestinationPolicy(host="example.com")
         result = policy.matches("not a url at all")
@@ -752,6 +788,18 @@ class TestRecipientPolicy:
         assert policy.approved_domains == []
         assert policy.identity_groups == {}
         assert policy.internal_only is False
+        assert policy.allow_first_contact is False
+
+    def test_dormant_allow_first_contact_raises(self):
+        """allow_first_contact=True is not yet enforced — raises if set."""
+        import pytest
+        from pydantic import ValidationError
+        with pytest.raises((ValidationError, Exception), match="not yet enforced"):
+            RecipientPolicy(allow_first_contact=True)
+
+    def test_dormant_allow_first_contact_false_passes(self):
+        """allow_first_contact=False (default) passes validation."""
+        policy = RecipientPolicy(allow_first_contact=False)
         assert policy.allow_first_contact is False
 
     def test_email_without_at_rejected(self):

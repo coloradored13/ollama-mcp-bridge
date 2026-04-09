@@ -1547,7 +1547,8 @@ class SecurityGateway:
         else:
             raise ToolBlockedError(
                 f"Tool '{tool_key}' is in state {state.value} and cannot be approved. "
-                "Only PENDING_FIRST_APPROVAL and BLOCKED_INTEGRITY tools can be approved.",
+                "Only PENDING_FIRST_APPROVAL and BLOCKED_INTEGRITY tools can be approved "
+                "(BLOCKED_SANITIZATION and BLOCKED_PROFILE blocks cannot be overridden).",
                 reason=f"state_{state.value}",
             )
 
@@ -1788,6 +1789,18 @@ class SecurityGateway:
                     f"in local_dev deployment mode. Consider sandboxed or high_consequence."
                 )
 
+            # Hardened profile: credential tool without secret scoping
+            if (
+                caps.credential_access
+                and self._security.security_profile == SecurityProfile.HARDENED
+                and not self._security.require_secret_scoping
+            ):
+                warnings.append(
+                    f"Tool '{tool.name}' on '{tool.server}' has credential_access capability "
+                    f"but require_secret_scoping=False under hardened profile. "
+                    f"Set require_secret_scoping=True to enforce secret isolation."
+                )
+
         # High-consequence deployment mode: required assertions
         if mode == DeploymentMode.HIGH_CONSEQUENCE:
             if not self._security.require_network_egress_controls:
@@ -1799,6 +1812,11 @@ class SecurityGateway:
                 raise ConfigError(
                     "deployment_mode='high_consequence' requires "
                     "require_filesystem_sandbox=True"
+                )
+            if not self._security.require_secret_scoping:
+                raise ConfigError(
+                    "deployment_mode='high_consequence' requires "
+                    "require_secret_scoping=True"
                 )
 
         for w in warnings:
@@ -1944,7 +1962,7 @@ class SecurityGateway:
                     server_name, tool.name, profile_candidate,
                 )
                 if profile_error:
-                    self._tool_states[tool_key] = ToolState.BLOCKED_SANITIZATION
+                    self._tool_states[tool_key] = ToolState.BLOCKED_PROFILE
                     self._audit.log_event(
                         AuditEventType.TOOL_BLOCKED,
                         server=server_name,

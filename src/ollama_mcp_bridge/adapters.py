@@ -46,6 +46,30 @@ _PATH_PATTERN = re.compile(
     r"(?:^|\s)((?:/[^\s\"']+)|(?:\./[^\s\"']+)|(?:\.\./[^\s\"']+)|(?:~/[^\s\"']+))",
 )
 
+# Field names that semantically indicate a filesystem path argument.
+# When a field's name is in this set, its string value is treated as a path
+# candidate regardless of whether it contains a slash (bare filenames like
+# "db.sqlite" or ".env" are caught this way).
+_FILESYSTEM_FIELD_NAMES: frozenset[str] = frozenset({
+    "file", "filename", "path", "filepath", "source_file", "dest_file",
+    "output_file", "input_file", "config_file", "db", "database",
+})
+
+# Negative filter patterns — values matching these are NOT treated as paths
+# even in filesystem-named fields, to avoid double-reporting with URL/recipient adapters.
+_URL_PREFIX = re.compile(r"^https?://", re.IGNORECASE)
+_EMAIL_PATTERN_SIMPLE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_IP_SIMPLE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
+
+
+def _is_non_path_value(value: str) -> bool:
+    """Return True if value is clearly a URL, email, or IP — not a file path."""
+    return bool(
+        _URL_PREFIX.match(value)
+        or _EMAIL_PATTERN_SIMPLE.match(value)
+        or _IP_SIMPLE.match(value)
+    )
+
 
 def _extract_paths_from_args(
     args: dict[str, Any], prefix: str = "",
@@ -53,6 +77,11 @@ def _extract_paths_from_args(
     """Recursively extract file path strings from arguments.
 
     Returns list of (field_name, path_value) tuples.
+
+    Two extraction strategies:
+    1. Slash-prefix pattern (_PATH_PATTERN): catches /abs/path, ./rel, ../traversal, ~/home.
+    2. Field-name gate (_FILESYSTEM_FIELD_NAMES): catches bare filenames (db.sqlite, .env)
+       in fields whose names indicate a file path. Negative filter skips URLs/emails/IPs.
     """
     results: list[tuple[str, str]] = []
 
@@ -64,6 +93,9 @@ def _extract_paths_from_args(
                 results.append((field_name, match.group(1)))
             # Also check if the entire value looks like a path
             if value.startswith(("/", "./", "../", "~/")):
+                results.append((field_name, value))
+            # Field-name gate: bare filenames in filesystem-semantic fields
+            elif key in _FILESYSTEM_FIELD_NAMES and value and not _is_non_path_value(value):
                 results.append((field_name, value))
         elif isinstance(value, dict):
             results.extend(_extract_paths_from_args(value, prefix=field_name))

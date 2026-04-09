@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -198,7 +199,14 @@ class AuditLogger:
         ))
 
     def flush(self) -> None:
-        """Write buffered entries to disk."""
+        """Write buffered entries to disk and fsync for durability.
+
+        fsync() is called unconditionally on every flush so that security-critical
+        events (TOOL_BLOCKED, RUG_PULL_DETECTED, etc.) survive a crash. These events
+        trigger immediate flush from log(), making fsync most valuable there — but
+        applying it on all flushes avoids split logic and the performance cost is
+        negligible (audit flushes are infrequent, not in the hot path).
+        """
         if not self._buffer:
             return
 
@@ -207,6 +215,8 @@ class AuditLogger:
                 for entry in self._buffer:
                     line = entry.model_dump_json()
                     f.write(line + "\n")
+                f.flush()
+                os.fsync(f.fileno())
             self._buffer.clear()
         except OSError as e:
             logger.error("Failed to write audit log: %s", e)

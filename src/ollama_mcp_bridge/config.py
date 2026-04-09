@@ -512,7 +512,7 @@ def load_config(path: str | Path) -> BridgeConfig:
                         allow_subdomains=True,
                         allow_ip_literals=False,
                         allow_private_ranges=False,
-                        allow_redirects=True,
+                        allow_redirects=False,
                     ))
             destinations.setdefault("_global", {})["_all"] = global_policies
 

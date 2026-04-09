@@ -252,3 +252,56 @@ class TestAuditEnrichedFields:
 
         content = (tmp_path / "audit.jsonl").read_text()
         assert hash_val in content
+
+
+class TestAuditFsync:
+    """flush() must call os.fsync() inside the with block for crash durability."""
+
+    def test_flush_calls_fsync(self, tmp_path):
+        """flush() invokes os.fsync on the file descriptor."""
+        from unittest.mock import MagicMock, patch
+
+        audit = AuditLogger(
+            audit_file=str(tmp_path / "audit.jsonl"),
+            session_id="test-session",
+        )
+        audit.log_event(AuditEventType.TOOL_CALL)
+        # Manually clear critical-event auto-flush to test explicit flush
+        audit._buffer.append(audit._session_entries[-1])  # re-add for explicit flush test
+
+        fsync_calls = []
+
+        original_fsync = __import__("os").fsync
+
+        def mock_fsync(fd):
+            fsync_calls.append(fd)
+            return original_fsync(fd)
+
+        with patch("ollama_mcp_bridge.audit.os.fsync", side_effect=mock_fsync):
+            audit.flush()
+
+        assert len(fsync_calls) >= 1, "os.fsync must be called during flush()"
+
+    def test_critical_event_triggers_immediate_flush_and_fsync(self, tmp_path):
+        """Critical events flush and fsync immediately via log()."""
+        from unittest.mock import patch
+
+        audit = AuditLogger(
+            audit_file=str(tmp_path / "audit.jsonl"),
+            session_id="test-session",
+        )
+
+        fsync_calls = []
+        original_fsync = __import__("os").fsync
+
+        def mock_fsync(fd):
+            fsync_calls.append(fd)
+            return original_fsync(fd)
+
+        with patch("ollama_mcp_bridge.audit.os.fsync", side_effect=mock_fsync):
+            audit.log_event(AuditEventType.TOOL_BLOCKED, server="s", tool="t")
+
+        assert len(fsync_calls) >= 1, "Critical event must trigger fsync"
+        # Verify event was written to disk (AuditEventType.TOOL_BLOCKED serializes as "tool_blocked")
+        content = (tmp_path / "audit.jsonl").read_text()
+        assert "tool_blocked" in content

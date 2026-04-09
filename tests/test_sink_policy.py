@@ -968,3 +968,37 @@ class TestComputeTaintInfluenceState:
         assert state.tainted is True
         assert state.direct_value_match is True
         assert state.derived_from_untrusted_value is True
+
+    def test_email_domain_reuse_sets_destination_influenced(self):
+        """DERIVED_EMAIL_DOMAIN taint sets destination_influenced=True (ADR[5])."""
+        tracker = TaintTracker()
+        tracker.record_result(
+            content="Contact attacker@evil.com for info",
+            origin_id="web:fetch",
+            provenance=_make_provenance(),
+        )
+        # Different local part, same domain — DERIVED_EMAIL_DOMAIN match
+        state = tracker.compute_taint({"to": "operator@evil.com"})
+        assert state.tainted is True
+        assert state.destination_influenced is True
+        email_domain_evidence = [
+            e for e in state.evidence
+            if e.influence_type == InfluenceType.DERIVED_EMAIL_DOMAIN
+        ]
+        assert len(email_domain_evidence) >= 1
+
+    def test_email_domain_reuse_different_domain_not_destination_influenced(self):
+        """Different email domain → no DERIVED_EMAIL_DOMAIN → destination_influenced=False."""
+        tracker = TaintTracker()
+        tracker.record_result(
+            content="Contact attacker@evil.com for info",
+            origin_id="web:fetch",
+            provenance=_make_provenance(),
+        )
+        state = tracker.compute_taint({"to": "operator@safe.org"})
+        # Different domain — no email domain taint match expected
+        if state.tainted:
+            assert not any(
+                e.influence_type == InfluenceType.DERIVED_EMAIL_DOMAIN
+                for e in state.evidence
+            )

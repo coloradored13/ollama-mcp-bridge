@@ -354,6 +354,73 @@ class TestPathExtraction:
         paths = [p for _, p in results]
         assert "/etc/config.yml" in paths
 
+    # --- Field-name gate (ADR[1] — bare filename detection) ---
+
+    def test_bare_filename_in_filename_field(self):
+        """Bare filename in 'filename' field is extracted (field-name gate)."""
+        results = _extract_paths_from_args({"filename": "db.sqlite"})
+        paths = [p for _, p in results]
+        assert "db.sqlite" in paths
+
+    def test_bare_filename_in_file_field(self):
+        """Bare filename in 'file' field is extracted."""
+        results = _extract_paths_from_args({"file": "secrets.txt"})
+        paths = [p for _, p in results]
+        assert "secrets.txt" in paths
+
+    def test_bare_filename_in_db_field(self):
+        """Bare database filename in 'db' field is extracted."""
+        results = _extract_paths_from_args({"db": "prod.db"})
+        paths = [p for _, p in results]
+        assert "prod.db" in paths
+
+    def test_dotenv_in_path_field(self):
+        """Bare '.env' in 'path' field is extracted."""
+        results = _extract_paths_from_args({"path": ".env"})
+        paths = [p for _, p in results]
+        assert ".env" in paths
+
+    def test_non_filesystem_field_not_extracted(self):
+        """Value in non-filesystem field is not extracted (no slash, no gate)."""
+        results = _extract_paths_from_args({"format": "json"})
+        assert results == []
+
+    def test_whitespace_value_not_extracted(self):
+        """Value with whitespace is not a bare filename."""
+        results = _extract_paths_from_args({"filename": "hello world"})
+        # Whitespace in a filename-field value is not a valid bare filename
+        # (no slash prefix, _PATH_PATTERN won't match). Field-name gate should
+        # still extract it since the field name is 'filename'. SafePath's
+        # PathPolicy handles rejection of invalid paths. Verify extraction.
+        paths = [p for _, p in results]
+        assert "hello world" in paths  # extracted; SafePath will reject it
+
+    def test_url_in_filename_field_not_extracted_as_path(self):
+        """URL value in 'filename' field skipped by negative filter."""
+        results = _extract_paths_from_args({"filename": "https://evil.com/payload"})
+        # Negative filter should skip URL values; slash-prefix _PATH_PATTERN won't match
+        # a URL as a path (it would match the path component but that's handled separately).
+        # The field-name gate has a negative filter for URLs.
+        paths = [p for _, p in results]
+        assert "https://evil.com/payload" not in paths
+
+    def test_email_in_filename_field_not_extracted_as_path(self):
+        """Email value in 'filename' field skipped by negative filter."""
+        results = _extract_paths_from_args({"filename": "user@example.com"})
+        paths = [p for _, p in results]
+        assert "user@example.com" not in paths
+
+    def test_plain_word_in_non_filesystem_field_not_extracted(self):
+        """Plain word in generic field not extracted."""
+        results = _extract_paths_from_args({"content": "report"})
+        assert results == []
+
+    def test_absolute_path_still_extracted_in_filesystem_field(self):
+        """Absolute path in filesystem-named field still extracted (both mechanisms work)."""
+        results = _extract_paths_from_args({"filename": "/etc/passwd"})
+        paths = [p for _, p in results]
+        assert "/etc/passwd" in paths
+
 
 # --- run_adapters orchestrator tests ---
 

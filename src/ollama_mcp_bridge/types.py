@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Any, Literal
 from urllib.parse import urlparse, unquote
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # --- Transport types ---
@@ -167,7 +167,8 @@ class ToolState(str, Enum):
 
     Lifecycle:
       DISCOVERED → ALLOWLISTED → [sanitize] → PENDING_FIRST_APPROVAL → APPROVED / DENIED_BY_USER
-      DISCOVERED → ALLOWLISTED → [sanitize] → BLOCKED_SANITIZATION  (terminal)
+      DISCOVERED → ALLOWLISTED → [sanitize] → BLOCKED_SANITIZATION  (terminal — pattern detection)
+      DISCOVERED → ALLOWLISTED → [sanitize] → pass → [profile] → BLOCKED_PROFILE  (terminal — capability enforcement)
       DISCOVERED → ALLOWLISTED → [integrity] → BLOCKED_INTEGRITY    (terminal)
       DISCOVERED → ALLOWLISTED → [hash match] → APPROVED            (auto, skip pending)
     """
@@ -177,6 +178,7 @@ class ToolState(str, Enum):
     PENDING_FIRST_APPROVAL = "PENDING_FIRST_APPROVAL"
     APPROVED = "APPROVED"
     BLOCKED_SANITIZATION = "BLOCKED_SANITIZATION"
+    BLOCKED_PROFILE = "BLOCKED_PROFILE"
     BLOCKED_INTEGRITY = "BLOCKED_INTEGRITY"
     DENIED_BY_USER = "DENIED_BY_USER"
 
@@ -450,7 +452,18 @@ class RecipientPolicy(BaseModel):
     approved_domains: list[str] = Field(default_factory=list)  # @domain.com matching
     identity_groups: dict[str, list[str]] = Field(default_factory=dict)  # named groups → addresses
     internal_only: bool = False  # True = only approved_domains/addresses, block everything else
-    allow_first_contact: bool = False  # False = block recipients never seen before
+    allow_first_contact: bool = False  # NOT_YET_ENFORCED — raises ValueError if set to True
+
+    @field_validator("allow_first_contact", mode="after")
+    @classmethod
+    def reject_allow_first_contact(cls, v: bool) -> bool:
+        if v:
+            raise ValueError(
+                "allow_first_contact=True is declared but not yet enforced. "
+                "Setting it creates false security confidence — field rejected. "
+                "Remove this field from your config until enforcement is implemented."
+            )
+        return v
 
     def validate_recipient(self, email: str) -> "RecipientMatchResult":
         """Check whether an email address satisfies this policy.
@@ -610,13 +623,57 @@ class DestinationPolicy(BaseModel):
     host: str  # required — the target hostname
     port: int | None = None  # None = any port allowed for the scheme
     path_prefixes: list[str] = Field(default_factory=list)  # empty = any path
-    query_constraints: dict[str, str] = Field(default_factory=dict)
+    query_constraints: dict[str, str] = Field(default_factory=dict)  # NOT_YET_ENFORCED — raises if non-empty
     allow_subdomains: bool = False
     allow_ip_literals: bool = False
     allow_private_ranges: bool = False
-    allow_redirects: bool = False
-    allowed_methods: list[str] = Field(default_factory=list)  # empty = any method
-    max_payload_bytes: int = 65536
+    allow_redirects: bool = False  # NOT_YET_ENFORCED — raises if True
+    allowed_methods: list[str] = Field(default_factory=list)  # NOT_YET_ENFORCED — raises if non-empty
+    max_payload_bytes: int = 65536  # NOT_YET_ENFORCED — raises if not default
+
+    @field_validator("query_constraints", mode="after")
+    @classmethod
+    def reject_query_constraints(cls, v: dict) -> dict:
+        if v:
+            raise ValueError(
+                "query_constraints is declared but not yet enforced. "
+                "Setting it creates false security confidence — field rejected. "
+                "Remove this field from your config until enforcement is implemented."
+            )
+        return v
+
+    @field_validator("allow_redirects", mode="after")
+    @classmethod
+    def reject_allow_redirects(cls, v: bool) -> bool:
+        if v:
+            raise ValueError(
+                "allow_redirects=True is declared but not yet enforced. "
+                "Setting it creates false security confidence — field rejected. "
+                "Remove this field from your config until enforcement is implemented."
+            )
+        return v
+
+    @field_validator("allowed_methods", mode="after")
+    @classmethod
+    def reject_allowed_methods(cls, v: list) -> list:
+        if v:
+            raise ValueError(
+                "allowed_methods is declared but not yet enforced. "
+                "Setting it creates false security confidence — field rejected. "
+                "Remove this field from your config until enforcement is implemented."
+            )
+        return v
+
+    @field_validator("max_payload_bytes", mode="after")
+    @classmethod
+    def reject_nondefault_max_payload_bytes(cls, v: int) -> int:
+        if v != 65536:
+            raise ValueError(
+                f"max_payload_bytes={v} is declared but not yet enforced. "
+                "Setting a non-default value creates false security confidence — field rejected. "
+                "Remove this field from your config until enforcement is implemented."
+            )
+        return v
 
     def matches(self, url: str) -> DestinationMatchResult:
         """Check whether a URL satisfies all constraints in this policy.

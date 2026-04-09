@@ -218,6 +218,7 @@ class TaintTracker:
             InfluenceType.DERIVED_URL_REUSE,
             InfluenceType.DERIVED_PROTOCOL_CHANGE,
             InfluenceType.DERIVED_HOSTNAME_IN_URL,
+            InfluenceType.DERIVED_EMAIL_DOMAIN,
         }
         has_destination = any(
             e.influence_type in destination_types for e in evidence

@@ -1599,10 +1599,65 @@ class TestValidateDeployment:
             deployment_mode="high_consequence",
             require_network_egress_controls=True,
             require_filesystem_sandbox=True,
+            require_secret_scoping=True,
         )
         warnings = gw.validate_deployment()
         # May have other warnings but shouldn't raise
         assert isinstance(warnings, list)
+
+    def test_high_consequence_requires_secret_scoping(self):
+        """high_consequence without require_secret_scoping=True → ConfigError."""
+        from ollama_mcp_bridge.errors import ConfigError
+
+        gw = self._make_gateway(
+            deployment_mode="high_consequence",
+            require_network_egress_controls=True,
+            require_filesystem_sandbox=True,
+            # require_secret_scoping intentionally omitted (defaults False)
+        )
+        with pytest.raises(ConfigError, match="require_secret_scoping"):
+            gw.validate_deployment()
+
+    def test_non_high_consequence_does_not_require_secret_scoping(self):
+        """sandboxed deployment mode does not require require_secret_scoping."""
+        gw = self._make_gateway(
+            deployment_mode="sandboxed",
+            require_network_egress_controls=False,
+            require_filesystem_sandbox=False,
+        )
+        # Should not raise even though require_secret_scoping=False
+        warnings = gw.validate_deployment()
+        assert isinstance(warnings, list)
+
+    def test_hardened_profile_credential_tool_without_scoping_warns(self):
+        """hardened profile + credential_access tool + no secret scoping → warning."""
+        gw = self._make_gateway(
+            security_profile="hardened",
+            require_first_run_approval=True,
+            auto_approve_first_seen=False,
+            # require_secret_scoping defaults to False
+        )
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(credential_access=True),
+        )
+        gw._approved_tools[tool.namespaced_name] = tool
+        warnings = gw.validate_deployment()
+        assert any("credential_access" in w and "require_secret_scoping" in w for w in warnings)
+
+    def test_hardened_profile_credential_tool_with_scoping_no_extra_warning(self):
+        """hardened profile + credential_access tool + scoping set → no scoping warning."""
+        gw = self._make_gateway(
+            security_profile="hardened",
+            require_first_run_approval=True,
+            auto_approve_first_seen=False,
+            require_secret_scoping=True,
+        )
+        tool = _make_approved(
+            capabilities=ToolCapabilityManifest(credential_access=True),
+        )
+        gw._approved_tools[tool.namespaced_name] = tool
+        warnings = gw.validate_deployment()
+        assert not any("require_secret_scoping" in w for w in warnings)
 
 
 # --- Audit enrichment tests ---
