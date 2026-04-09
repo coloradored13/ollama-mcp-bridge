@@ -1643,54 +1643,91 @@ class SecurityGateway:
         """Check whether a tool meets the active security profile's requirements.
 
         Returns None if the tool passes, or an error string if it should be blocked.
+
+        HARDENED profile (ADR[5]): Fail-loud for CONFIG-source capable tools that
+        lack the appropriate typed policy. INFERRED-source tools produce a warning
+        only (inference may be wrong; operator hasn't confirmed capabilities).
+
+        HIGH_CONSEQUENCE profile: Applies the same checks as HARDENED, plus blocks
+        INFERRED-source dangerous tools entirely (stricter — no benefit of the doubt).
         """
         profile = self._security.security_profile
+        caps = approved.capabilities
 
-        if profile == SecurityProfile.HIGH_CONSEQUENCE:
-            caps = approved.capabilities
+        if profile in (SecurityProfile.HARDENED, SecurityProfile.HIGH_CONSEQUENCE):
+            is_high_consequence = profile == SecurityProfile.HIGH_CONSEQUENCE
 
-            # Dangerous tools must have explicit (non-inferred) capability manifest
-            if caps.is_dangerous and caps.source == CapabilitySource.INFERRED:
+            # HIGH_CONSEQUENCE only: dangerous tools must have explicit capability manifest
+            if is_high_consequence and caps.is_dangerous and caps.source == CapabilitySource.INFERRED:
                 return (
                     f"high_consequence profile requires explicit capability manifest "
                     f"for dangerous tool '{tool_name}' (currently inferred-only). "
                     f"Add [capabilities.{server_name}.{tool_name}] to config."
                 )
 
-            # Outbound-capable tools require destination policy
+            # Outbound-capable tools require destination policy.
+            # CONFIG-source: hard error. INFERRED-source: warn only (logged by caller).
             if caps.has_outbound_capability:
                 policies = self._config.get_destination_policies(server_name, tool_name)
                 if not policies:
-                    return (
-                        f"high_consequence profile requires destination policy "
-                        f"for outbound-capable tool '{tool_name}'. "
-                        f"Add [[destinations.{server_name}.{tool_name}]] to config."
-                    )
+                    if caps.source == CapabilitySource.CONFIG or is_high_consequence:
+                        profile_name = "high_consequence" if is_high_consequence else "hardened"
+                        return (
+                            f"{profile_name} profile requires destination policy "
+                            f"for outbound-capable tool '{tool_name}'. "
+                            f"Add [[destinations.{server_name}.{tool_name}]] to config."
+                        )
+                    else:
+                        logger.warning(
+                            "HARDENED profile: outbound-capable tool '%s' on '%s' has no "
+                            "destination policy (capability inferred — add explicit config to "
+                            "enforce policy or confirm capability with "
+                            "[capabilities.%s.%s])",
+                            tool_name, server_name, server_name, tool_name,
+                        )
 
-            # Filesystem tools require path policy
+            # Filesystem-write/delete tools require path policy.
             if caps.filesystem_write or caps.filesystem_delete:
                 path_policy = self._config.get_path_policy(server_name, tool_name)
                 if not path_policy:
-                    return (
-                        f"high_consequence profile requires path policy "
-                        f"for filesystem-write tool '{tool_name}'. "
-                        f"Add [paths.{server_name}.{tool_name}] to config."
-                    )
+                    if caps.source == CapabilitySource.CONFIG or is_high_consequence:
+                        profile_name = "high_consequence" if is_high_consequence else "hardened"
+                        return (
+                            f"{profile_name} profile requires path policy "
+                            f"for filesystem-write tool '{tool_name}'. "
+                            f"Add [paths.{server_name}.{tool_name}] to config."
+                        )
+                    else:
+                        logger.warning(
+                            "HARDENED profile: filesystem-write tool '%s' on '%s' has no "
+                            "path policy (capability inferred — add [paths.%s.%s] to config)",
+                            tool_name, server_name, server_name, tool_name,
+                        )
 
-            # Messaging tools require recipient policy
+            # Messaging tools require recipient policy.
             if caps.external_messaging:
                 recip_policy = self._config.get_recipient_policy(server_name, tool_name)
                 if not recip_policy:
-                    return (
-                        f"high_consequence profile requires recipient policy "
-                        f"for messaging tool '{tool_name}'. "
-                        f"Add [recipients.{server_name}.{tool_name}] to config."
-                    )
+                    if caps.source == CapabilitySource.CONFIG or is_high_consequence:
+                        profile_name = "high_consequence" if is_high_consequence else "hardened"
+                        return (
+                            f"{profile_name} profile requires recipient policy "
+                            f"for messaging tool '{tool_name}'. "
+                            f"Add [recipients.{server_name}.{tool_name}] to config."
+                        )
+                    else:
+                        logger.warning(
+                            "HARDENED profile: messaging tool '%s' on '%s' has no "
+                            "recipient policy (capability inferred — add "
+                            "[recipients.%s.%s] to config)",
+                            tool_name, server_name, server_name, tool_name,
+                        )
 
             # Memory-write tools blocked unless explicitly allowed
             if caps.memory_write and not self._security.allow_memory_writes_from_third_party_content:
+                profile_name = "high_consequence" if is_high_consequence else "hardened"
                 return (
-                    f"high_consequence profile blocks memory-write tool '{tool_name}' "
+                    f"{profile_name} profile blocks memory-write tool '{tool_name}' "
                     f"unless allow_memory_writes_from_third_party_content=True."
                 )
 

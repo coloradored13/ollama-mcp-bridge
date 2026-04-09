@@ -54,6 +54,7 @@ from .types import (
     StreamEvent,
     StreamEventType,
     ToolCallRecord,
+    ToolSignalCode,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,7 @@ class AgentLoop:
         model: str,
         system_prompt: str | None = None,
         on_event: Callable[[StreamEvent], Awaitable[None]] | None = None,
+        trace_id: str = "",
     ) -> BridgeResult:
         """Execute a multi-turn tool-call loop.
 
@@ -113,6 +115,9 @@ class AgentLoop:
             model: Ollama model name.
             system_prompt: Optional system prompt.
             on_event: Optional callback for streaming events.
+            trace_id: Correlation ID assigned by Bridge.run() — propagated to all
+                ToolCallRecords and the final BridgeResult so callers can correlate
+                all tool calls belonging to a single Bridge.run() invocation.
 
         Returns:
             BridgeResult with final response and tool call records.
@@ -157,6 +162,7 @@ class AgentLoop:
                         tool_calls=tool_records,
                         model=model,
                         turns=turn + 1,
+                        trace_id=trace_id,
                     )
 
                 # Empty response, no tool calls — model is stuck
@@ -215,6 +221,8 @@ class AgentLoop:
                         result_summary=error_msg[:200],
                         blocked=True,
                         block_reason="unknown_tool",
+                        signal=ToolSignalCode.FAILURE,
+                        trace_id=trace_id,
                     ))
                     if on_event:
                         await on_event(StreamEvent(
@@ -253,6 +261,8 @@ class AgentLoop:
                         arguments=args,
                         result_summary=result.content[:200],
                         duration_ms=result.duration_ms,
+                        signal=ToolSignalCode.SUCCESS,
+                        trace_id=trace_id,
                     ))
                     if on_event:
                         await on_event(StreamEvent(
@@ -273,6 +283,8 @@ class AgentLoop:
                         arguments=args,
                         blocked=True,
                         block_reason=e.reason,
+                        signal=ToolSignalCode.FAILURE,
+                        trace_id=trace_id,
                     ))
 
                 except ConfirmationDeniedError:
@@ -286,6 +298,8 @@ class AgentLoop:
                         arguments=args,
                         blocked=True,
                         block_reason="user_denied",
+                        signal=ToolSignalCode.FAILURE,
+                        trace_id=trace_id,
                     ))
 
                 except ParameterRejectedError as e:
@@ -309,6 +323,8 @@ class AgentLoop:
                         arguments=args,
                         blocked=True,
                         block_reason="parameter_rejected",
+                        signal=ToolSignalCode.INVALID_STATE,
+                        trace_id=trace_id,
                     ))
 
                 except RateLimitError as e:
@@ -332,6 +348,8 @@ class AgentLoop:
                         arguments=args,
                         blocked=True,
                         block_reason="rate_limited",
+                        signal=ToolSignalCode.TIMEOUT,
+                        trace_id=trace_id,
                     ))
 
                 except MCPToolError as e:
@@ -344,15 +362,23 @@ class AgentLoop:
                         tool_name=tool_name,
                         arguments=args,
                         result_summary=msg[:200],
+                        signal=ToolSignalCode.FAILURE,
+                        trace_id=trace_id,
                     ))
 
-        # Max turns reached
+        # Max turns reached — signal RECOVERY_REQUIRED on the last record if present
+        if tool_records:
+            last = tool_records[-1]
+            tool_records[-1] = last.model_copy(
+                update={"signal": ToolSignalCode.RECOVERY_REQUIRED}
+            )
         return BridgeResult(
             content="Maximum turns reached. Partial results may be available in tool_calls.",
             tool_calls=tool_records,
             model=model,
             turns=self._max_turns,
             truncated=True,
+            trace_id=trace_id,
         )
 
     async def execute_stream(

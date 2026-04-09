@@ -32,6 +32,7 @@ Use the async API (bridge.run()) in those contexts.
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import logging
 import uuid
 from pathlib import Path
@@ -56,6 +57,11 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+try:
+    _BRIDGE_VERSION = importlib.metadata.version("ollama-mcp-bridge")
+except importlib.metadata.PackageNotFoundError:
+    _BRIDGE_VERSION = "unknown"
 
 
 class Bridge:
@@ -248,15 +254,21 @@ class Bridge:
         else:
             loop = self._loop
 
+        # Generate a per-invocation trace_id (uuid4 — random, no internal state leak).
+        # This correlates all ToolCallRecords produced during this Bridge.run() call.
+        trace_id = str(uuid.uuid4())
+
         result = await loop.execute(
             prompt=prompt,
             model=model,
             system_prompt=system_prompt,
             on_event=on_event,
+            trace_id=trace_id,
         )
 
-        # Attach audit log to result
+        # Attach audit log and provenance metadata to result
         result.audit_log = self._audit.get_session_entries()
+        result.bridge_version = _BRIDGE_VERSION
 
         return result
 

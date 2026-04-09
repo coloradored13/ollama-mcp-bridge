@@ -21,7 +21,7 @@ import json
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -527,6 +527,72 @@ class DestinationMatchResult(BaseModel):
     failure_reason: str = ""  # empty if matched
 
 
+def normalize_and_validate_ip(
+    raw_host: str,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Normalize and validate a hostname string as an IP address.
+
+    Handles bypass forms that ipaddress.ip_address() alone misses:
+    - Decimal-encoded IPv4 (2130706433 → 127.0.0.1)
+    - Hex-encoded IPv4 (0x7f000001 → 127.0.0.1)
+    - Octal-segment IPv4 (0177.0.0.1 → 127.0.0.1)
+    - Percent-encoded octets (%31%32%37... → 127.0.0.1)
+    - IPv4-mapped IPv6 (::ffff:127.0.0.1)
+    - Standard IPv4/IPv6 literals
+
+    Returns the parsed IP address if the input is any form of IP,
+    or None if it is a plain hostname (domain name). Never raises.
+    """
+    if not raw_host:
+        return None
+
+    # 1. Percent-decode first — catches URL-encoded IPs before any other check
+    decoded = unquote(raw_host)
+
+    # 2. Standard parse — handles plain IPv4, IPv6, and IPv4-mapped IPv6 (::ffff:*)
+    try:
+        return ipaddress.ip_address(decoded)
+    except ValueError:
+        pass
+
+    # 3. Decimal-encoded IPv4 (single integer: 2130706433 → 127.0.0.1)
+    try:
+        val = int(decoded, 10)
+        if 0 <= val <= 0xFFFFFFFF:
+            return ipaddress.IPv4Address(val)
+    except (ValueError, OverflowError):
+        pass
+
+    # 4. Hex-encoded IPv4 (0x7f000001 → 127.0.0.1)
+    if decoded.lower().startswith("0x"):
+        try:
+            val = int(decoded, 16)
+            if 0 <= val <= 0xFFFFFFFF:
+                return ipaddress.IPv4Address(val)
+        except (ValueError, OverflowError):
+            pass
+
+    # 5. Octal-segment IPv4 (0177.0.0.1 — any octet prefixed with 0).
+    #    Only 4-octet form handled: "0177.1" (short forms) intentionally return None.
+    parts = decoded.split(".")
+    if len(parts) == 4:
+        try:
+            octets = []
+            has_octal = False
+            for part in parts:
+                if part.startswith("0") and len(part) > 1 and not part.startswith("0x"):
+                    octets.append(int(part, 8))
+                    has_octal = True
+                else:
+                    octets.append(int(part, 10))
+            if has_octal and all(0 <= o <= 255 for o in octets):
+                return ipaddress.IPv4Address(bytes(octets))
+        except (ValueError, OverflowError):
+            pass
+
+    return None
+
+
 class DestinationPolicy(BaseModel):
     """Typed destination constraint for outbound tool calls.
 
@@ -586,12 +652,11 @@ class DestinationPolicy(BaseModel):
             )
 
         # 2. IP literal check (before host comparison)
-        is_ip = False
-        try:
-            addr = ipaddress.ip_address(hostname)
-            is_ip = True
-        except ValueError:
-            pass
+        # normalize_and_validate_ip() catches all encoding forms:
+        # decimal (2130706433), hex (0x7f000001), octal (0177.x.x.x),
+        # percent-encoded, IPv4-mapped IPv6 (::ffff:127.0.0.1), plain IPv4/IPv6.
+        addr = normalize_and_validate_ip(hostname)
+        is_ip = addr is not None
 
         if is_ip and not self.allow_ip_literals:
             return DestinationMatchResult(
@@ -603,6 +668,7 @@ class DestinationPolicy(BaseModel):
 
         # 3. Private range check
         if is_ip and not self.allow_private_ranges:
+            assert addr is not None
             if addr.is_private or addr.is_loopback or addr.is_link_local:
                 return DestinationMatchResult(
                     **{**base.model_dump(), "failure_reason": (
@@ -630,11 +696,15 @@ class DestinationPolicy(BaseModel):
                     )},
                 )
         else:
-            # IP literal that passed the allow check — still must match host
-            if hostname != self.host:
+            # IP literal that passed the allow check — still must match policy host.
+            # Compare normalized form (str of parsed IP) against policy host to handle
+            # encoding variants that all resolve to the same address.
+            assert addr is not None
+            if str(addr) != self.host and hostname != self.host:
                 return DestinationMatchResult(
                     **{**base.model_dump(), "failure_reason": (
-                        f"IP '{hostname}' does not match policy host '{self.host}'"
+                        f"IP '{hostname}' (normalized: {addr}) does not match "
+                        f"policy host '{self.host}'"
                     )},
                 )
 
@@ -1089,6 +1159,31 @@ class AuditEntry(BaseModel):
 # --- Consumer-facing types ---
 
 
+class ToolSignalCode(str, Enum):
+    """Generic signal code for a tool call outcome — bridge-assigned, not MCP-derived.
+
+    Provides a structured summary of what happened during a tool call that the
+    orchestrator can map to phase-gate semantics without coupling the bridge to
+    sigma-specific terminology.
+
+    Codes are assigned by the bridge's exception handling in AgentLoop, not by
+    MCP tool output — a malicious server cannot forge a signal code.
+
+    SUCCESS: Tool executed and returned a result (may be an error result — the tool
+        ran successfully but its output was an error).
+    FAILURE: Tool was blocked, denied, or produced an unrecoverable error.
+    TIMEOUT: Rate limit hit or execution timed out (retry may succeed).
+    INVALID_STATE: Parameters were malformed or rejected — caller logic error.
+    RECOVERY_REQUIRED: Max turns reached; orchestrator should decide next action.
+    """
+
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"
+    TIMEOUT = "TIMEOUT"
+    INVALID_STATE = "INVALID_STATE"
+    RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+
+
 class ToolCallRecord(BaseModel):
     """Record of a single tool call for consumer inspection."""
 
@@ -1099,6 +1194,8 @@ class ToolCallRecord(BaseModel):
     duration_ms: float = 0.0
     blocked: bool = False
     block_reason: str = ""
+    signal: ToolSignalCode = ToolSignalCode.SUCCESS  # bridge-assigned outcome code
+    trace_id: str = ""  # correlates all records within a single Bridge.run() call
 
 
 class BridgeResult(BaseModel):
@@ -1110,6 +1207,8 @@ class BridgeResult(BaseModel):
     model: str = ""
     turns: int = 0
     truncated: bool = False  # True if max_turns reached
+    trace_id: str = ""  # same trace_id as all ToolCallRecords in this result
+    bridge_version: str = ""  # version of ollama-mcp-bridge that produced this result
 
 
 class StreamEventType(str, Enum):

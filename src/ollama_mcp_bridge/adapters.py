@@ -33,7 +33,7 @@ from urllib.parse import urlparse
 
 from .config import SecurityConfig
 from .sink_policy import _extract_values_from_args, _is_memory_write_tool
-from .types import ApprovedTool, DestinationPolicy, PathPolicy, RecipientPolicy
+from .types import ApprovedTool, DestinationPolicy, PathPolicy, RecipientPolicy, normalize_and_validate_ip
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,11 @@ class SafeURL:
     ) -> list[str]:
         # Destination policies take precedence (PR 11 path)
         if destination_policies:
-            return self._check_destination_policies(args, destination_policies)
+            errors = self._check_destination_policies(args, destination_policies)
+            # Also enforce policy against raw host/IP/host:port args (non-URL fields).
+            # These bypass _check_destination_policies which only scans kind="url" entries.
+            errors.extend(self._check_raw_host_args(args, destination_policies))
+            return errors
 
         # Require flag with no policies — block outbound tools with URLs
         if config.require_destination_policy_for_outbound:
@@ -184,6 +188,74 @@ class SafeURL:
                 errors.append(
                     f"[{self.name}] Field '{field_name}': URL '{ev.value[:80]}' "
                     f"does not match any destination policy{reason_hint}"
+                )
+
+        return errors
+
+    def _check_raw_host_args(
+        self,
+        args: dict[str, Any],
+        policies: list[DestinationPolicy],
+    ) -> list[str]:
+        """Validate raw host/IP args against destination policies.
+
+        Closes the non-URL bypass (BS[2]): tool args may contain destination hosts
+        as plain "host" strings or "host:port" patterns that are not URLs and thus
+        bypass _check_destination_policies which only scans kind="url" entries.
+
+        Checks ExtractedValue entries with kind in {"ip", "hostname", "host_port"}.
+        For each, synthesizes a minimal https:// URL and runs it against the policies.
+        IP entries are also checked via normalize_and_validate_ip to catch encoded forms.
+
+        Fields that already contain URLs are skipped — the URL check covers those.
+        This prevents double-reporting when a URL string is parsed and both a url
+        and a host_port entry are extracted from the same field value.
+        """
+        errors: list[str] = []
+        entries = _extract_values_from_args(args)
+
+        # Fields that already had URL entries — skip them in the raw host check
+        # to avoid double-reporting (URL check covers host extraction from those).
+        url_fields: set[str] = {fn for fn, ev in entries if ev.kind == "url"}
+
+        for field_name, ev in entries:
+            if ev.kind not in ("ip", "hostname", "host_port"):
+                continue
+            # Skip if this field already had a URL — url check covers it
+            if field_name in url_fields:
+                continue
+
+            # Synthesize a URL to run through DestinationPolicy.matches()
+            raw = ev.value
+            if ev.kind == "host_port":
+                # "10.0.0.1:8080" — use as-is after stripping port for IP check
+                host_part = raw.rsplit(":", 1)[0] if ":" in raw else raw
+                synthetic_url = f"https://{raw}/"
+            else:
+                host_part = raw
+                synthetic_url = f"https://{raw}/"
+
+            # For IP entries: apply normalize_and_validate_ip to catch encoded forms.
+            # If normalized form is private/loopback and no policy allows it, block.
+            if ev.kind == "ip":
+                addr = normalize_and_validate_ip(host_part)
+                if addr is not None and (addr.is_private or addr.is_loopback or addr.is_link_local):
+                    # Check if any policy explicitly allows private ranges
+                    if not any(p.allow_private_ranges or p.allow_ip_literals for p in policies):
+                        errors.append(
+                            f"[{self.name}] Field '{field_name}': raw IP arg "
+                            f"'{raw[:80]}' resolves to private/loopback address "
+                            f"({addr}) — no destination policy allows private ranges"
+                        )
+                        continue
+
+            match_results = [p.matches(synthetic_url) for p in policies]
+            if not any(r.matched for r in match_results):
+                reasons = [r.failure_reason for r in match_results if r.failure_reason]
+                reason_hint = f" ({reasons[0]})" if reasons else ""
+                errors.append(
+                    f"[{self.name}] Field '{field_name}': raw host arg "
+                    f"'{raw[:80]}' does not match any destination policy{reason_hint}"
                 )
 
         return errors
@@ -366,7 +438,14 @@ class SafeMemoryWriteCandidate:
         args: dict[str, Any],
         config: SecurityConfig,
     ) -> list[str]:
-        if not _is_memory_write_tool(tool.name):
+        # CapabilitySource-aware dispatch (Q6): prefer explicit manifest over name heuristic.
+        # If the operator declared capabilities in config, trust that declaration.
+        # Only fall back to name-pattern inference if capabilities were not explicitly set.
+        is_memory_write = tool.capabilities.memory_write
+        if not is_memory_write:
+            # Capability not in manifest (INFERRED source or not set) — check name heuristic
+            is_memory_write = _is_memory_write_tool(tool.name)
+        if not is_memory_write:
             return []
 
         errors: list[str] = []
