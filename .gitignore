@@ -8,3 +8,4 @@ dist/
 build/
 .eggs/
 ~/.ollama-mcp-bridge/
+.DS_Store
