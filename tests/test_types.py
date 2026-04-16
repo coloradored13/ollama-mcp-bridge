@@ -1,7 +1,8 @@
 """Tests for types.py — shared data types."""
 
-import pytest
 from datetime import datetime
+
+import pytest
 
 from ollama_mcp_bridge.types import (
     ActionClass,
@@ -33,11 +34,15 @@ class TestToolSchema:
             "required": ["query"],
         }
         t1 = ToolSchema(
-            server="s", name="t", description="original",
+            server="s",
+            name="t",
+            description="original",
             input_schema=schema,
         )
         t2 = ToolSchema(
-            server="s", name="t", description="modified",
+            server="s",
+            name="t",
+            description="modified",
             input_schema=schema,
         )
         assert t1.definition_hash != t2.definition_hash
@@ -45,7 +50,9 @@ class TestToolSchema:
     def test_raw_definition_canonical(self):
         """Raw definition should be JSON with sorted keys, no spaces."""
         t = ToolSchema(
-            server="s", name="tool", description="desc",
+            server="s",
+            name="tool",
+            description="desc",
             input_schema={"type": "object", "properties": {}},
         )
         raw = t.raw_definition
@@ -55,6 +62,7 @@ class TestToolSchema:
     def test_frozen_model(self, sample_tool_schema: ToolSchema):
         """ToolSchema should be immutable."""
         import pytest
+
         with pytest.raises(Exception):
             sample_tool_schema.name = "changed"
 
@@ -65,8 +73,11 @@ class TestApprovedTool:
 
     def test_namespaced_name_format(self):
         tool = ApprovedTool(
-            server="files", name="read_file", description="Read",
-            input_schema={}, classification=ActionClass.READ,
+            server="files",
+            name="read_file",
+            description="Read",
+            input_schema={},
+            classification=ActionClass.READ,
             definition_hash="x",
         )
         assert tool.namespaced_name == "files__read_file"
@@ -98,8 +109,17 @@ class TestOllamaToolCall:
 class TestSourceType:
     def test_all_source_types_defined(self):
         """All spec §7.2.1 source types exist."""
-        expected = {"user", "system", "developer_policy", "tool_result",
-                    "document", "webpage", "email", "memory", "unknown"}
+        expected = {
+            "user",
+            "system",
+            "developer_policy",
+            "tool_result",
+            "document",
+            "webpage",
+            "email",
+            "memory",
+            "unknown",
+        }
         actual = {s.value for s in SourceType}
         assert actual == expected
 
@@ -295,14 +315,16 @@ class TestDestinationPolicy:
 
     def test_path_prefix_match(self):
         policy = DestinationPolicy(
-            host="api.example.com", path_prefixes=["/v1/", "/v2/"],
+            host="api.example.com",
+            path_prefixes=["/v1/", "/v2/"],
         )
         result = policy.matches("https://api.example.com/v1/users")
         assert result.matched is True
 
     def test_path_prefix_no_match(self):
         policy = DestinationPolicy(
-            host="api.example.com", path_prefixes=["/v1/"],
+            host="api.example.com",
+            path_prefixes=["/v1/"],
         )
         result = policy.matches("https://api.example.com/admin/users")
         assert result.matched is False
@@ -321,14 +343,18 @@ class TestDestinationPolicy:
 
     def test_ip_literal_allowed_when_enabled(self):
         policy = DestinationPolicy(
-            host="8.8.8.8", allow_ip_literals=True, allow_private_ranges=True,
+            host="8.8.8.8",
+            allow_ip_literals=True,
+            allow_private_ranges=True,
         )
         result = policy.matches("https://8.8.8.8/dns")
         assert result.matched is True
 
     def test_private_range_rejected(self):
         policy = DestinationPolicy(
-            host="192.168.1.1", allow_ip_literals=True, allow_private_ranges=False,
+            host="192.168.1.1",
+            allow_ip_literals=True,
+            allow_private_ranges=False,
         )
         result = policy.matches("https://192.168.1.1/api")
         assert result.matched is False
@@ -336,7 +362,9 @@ class TestDestinationPolicy:
 
     def test_private_range_allowed(self):
         policy = DestinationPolicy(
-            host="192.168.1.1", allow_ip_literals=True, allow_private_ranges=True,
+            host="192.168.1.1",
+            allow_ip_literals=True,
+            allow_private_ranges=True,
         )
         result = policy.matches("https://192.168.1.1/api")
         assert result.matched is True
@@ -362,6 +390,7 @@ class TestDestinationPolicy:
         """query_constraints is not yet enforced — raises if set."""
         import pytest
         from pydantic import ValidationError
+
         with pytest.raises((ValidationError, Exception), match="not yet enforced"):
             DestinationPolicy(host="example.com", query_constraints={"token": "abc"})
 
@@ -369,6 +398,7 @@ class TestDestinationPolicy:
         """allow_redirects=True is not yet enforced — raises if set."""
         import pytest
         from pydantic import ValidationError
+
         with pytest.raises((ValidationError, Exception), match="not yet enforced"):
             DestinationPolicy(host="example.com", allow_redirects=True)
 
@@ -376,6 +406,7 @@ class TestDestinationPolicy:
         """allowed_methods is not yet enforced — raises if set."""
         import pytest
         from pydantic import ValidationError
+
         with pytest.raises((ValidationError, Exception), match="not yet enforced"):
             DestinationPolicy(host="example.com", allowed_methods=["GET"])
 
@@ -383,6 +414,7 @@ class TestDestinationPolicy:
         """Non-default max_payload_bytes is not yet enforced — raises if changed."""
         import pytest
         from pydantic import ValidationError
+
         with pytest.raises((ValidationError, Exception), match="not yet enforced"):
             DestinationPolicy(host="example.com", max_payload_bytes=32768)
 
@@ -424,7 +456,8 @@ class TestDestinationMatchResult:
 
     def test_matched_result(self):
         r = DestinationMatchResult(
-            matched=True, policy_host="example.com",
+            matched=True,
+            policy_host="example.com",
             checked_url="https://example.com/v1",
         )
         assert r.matched is True
@@ -459,13 +492,15 @@ class TestInfluenceState:
         assert state.confidence == 0.0
 
     def test_tainted_with_evidence(self):
-        evidence = [InfluenceEvidence(
-            influence_type=InfluenceType.DIRECT_VALUE_MATCH,
-            tracked_value="https://evil.com",
-            arg_value="https://evil.com",
-            origin_id="search:web",
-            confidence=0.9,
-        )]
+        evidence = [
+            InfluenceEvidence(
+                influence_type=InfluenceType.DIRECT_VALUE_MATCH,
+                tracked_value="https://evil.com",
+                arg_value="https://evil.com",
+                origin_id="search:web",
+                confidence=0.9,
+            )
+        ]
         state = InfluenceState(
             tainted=True,
             taint_sources=["search:web"],
@@ -553,6 +588,7 @@ class TestPathPolicy:
     def test_relative_path_allowed_when_enabled(self):
         """When allow_relative_paths=True, relative paths within root are allowed."""
         import os
+
         # Use CWD-relative path that stays in root — test with absolute root
         sandbox = os.path.realpath("/tmp/sandbox_test_rel")
         os.makedirs(sandbox, exist_ok=True)
@@ -588,6 +624,7 @@ class TestPathPolicy:
 
     def test_home_expansion_allowed_by_default(self):
         import os
+
         home = os.path.expanduser("~")
         policy = PathPolicy(allowed_roots=[home])
         result = policy.validate_path("~/documents/file.txt")
@@ -699,7 +736,8 @@ class TestPathMatchResult:
 
     def test_matched_result(self):
         r = PathMatchResult(
-            matched=True, policy_roots=["/tmp"],
+            matched=True,
+            policy_roots=["/tmp"],
             checked_path="/tmp/file.txt",
         )
         assert r.matched is True
@@ -794,6 +832,7 @@ class TestRecipientPolicy:
         """allow_first_contact=True is not yet enforced — raises if set."""
         import pytest
         from pydantic import ValidationError
+
         with pytest.raises((ValidationError, Exception), match="not yet enforced"):
             RecipientPolicy(allow_first_contact=True)
 
@@ -818,7 +857,8 @@ class TestRecipientMatchResult:
 
     def test_matched_result(self):
         r = RecipientMatchResult(
-            matched=True, checked_recipient="admin@co.com",
+            matched=True,
+            checked_recipient="admin@co.com",
             match_type="exact_address",
         )
         assert r.matched is True

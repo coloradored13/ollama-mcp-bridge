@@ -1,8 +1,8 @@
 """Tests for config.py — configuration loading and validation."""
 
-import pytest
-import tempfile
 from pathlib import Path
+
+import pytest
 
 from ollama_mcp_bridge.config import (
     BridgeConfig,
@@ -63,9 +63,7 @@ class TestSecurityConfig:
             SecurityConfig(max_turns_hard_cap=5, max_turns=10)
 
     def test_custom_detectors(self):
-        cfg = SecurityConfig(
-            enabled_detectors=["instruction_language", "exfiltration_pattern"]
-        )
+        cfg = SecurityConfig(enabled_detectors=["instruction_language", "exfiltration_pattern"])
         assert len(cfg.enabled_detectors) == 2
 
     def test_default_require_first_run_approval(self):
@@ -79,6 +77,7 @@ class TestSecurityConfig:
     def test_auto_approve_warns_when_require_also_true(self, caplog):
         """auto_approve_first_seen=True with require_first_run_approval=True logs warning."""
         import logging
+
         with caplog.at_level(logging.WARNING):
             SecurityConfig(auto_approve_first_seen=True, require_first_run_approval=True)
         assert "auto_approve_first_seen=True overrides" in caplog.text
@@ -96,9 +95,7 @@ class TestBridgeConfig:
 
     def test_invalid_server_name(self):
         with pytest.raises(ValueError, match="alphanumeric"):
-            BridgeConfig(
-                servers={"bad name!": ServerConfig(command="python")}
-            )
+            BridgeConfig(servers={"bad name!": ServerConfig(command="python")})
 
     def test_destructive_must_be_in_allowed(self):
         with pytest.raises(ValueError, match="must also be in allowed_tools"):
@@ -141,16 +138,12 @@ class TestBridgeConfig:
 
     def test_is_tool_allowed_empty_allowlist(self):
         """Empty allowlist means no tools allowed (fail-closed)."""
-        cfg = BridgeConfig(
-            servers={"s": ServerConfig(command="python", allowed_tools=[])}
-        )
+        cfg = BridgeConfig(servers={"s": ServerConfig(command="python", allowed_tools=[])})
         assert cfg.is_tool_allowed("s", "anything") is False
 
     def test_empty_allowlist_blocks_all_tools(self):
         """Empty allowlist blocks every tool name, not just one."""
-        cfg = BridgeConfig(
-            servers={"s": ServerConfig(command="python", allowed_tools=[])}
-        )
+        cfg = BridgeConfig(servers={"s": ServerConfig(command="python", allowed_tools=[])})
         for tool in ["read", "write", "delete", "list", "execute"]:
             assert cfg.is_tool_allowed("s", tool) is False
 
@@ -216,9 +209,6 @@ allowed_tools = ["tool1"]
 
 
 # --- Destination Policy Config tests ---
-
-
-from ollama_mcp_bridge.types import DestinationPolicy
 
 
 class TestDestinationPolicyConfig:

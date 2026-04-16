@@ -26,12 +26,18 @@ import logging
 import tomllib
 from enum import Enum
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .errors import ConfigError
-from .types import ActionClass, CapabilitySource, DestinationPolicy, PathPolicy, RecipientPolicy, ToolCapabilityManifest
+from .types import (
+    ActionClass,
+    CapabilitySource,
+    DestinationPolicy,
+    PathPolicy,
+    RecipientPolicy,
+    ToolCapabilityManifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -180,24 +186,18 @@ class SecurityConfig(BaseModel):
         if self.security_profile == SecurityProfile.HARDENED:
             if not self.require_first_run_approval:
                 raise ValueError(
-                    "security_profile='hardened' requires "
-                    "require_first_run_approval=True"
+                    "security_profile='hardened' requires require_first_run_approval=True"
                 )
             if self.auto_approve_first_seen:
-                raise ValueError(
-                    "security_profile='hardened' forbids "
-                    "auto_approve_first_seen=True"
-                )
+                raise ValueError("security_profile='hardened' forbids auto_approve_first_seen=True")
         elif self.security_profile == SecurityProfile.HIGH_CONSEQUENCE:
             if not self.require_first_run_approval:
                 raise ValueError(
-                    "security_profile='high_consequence' requires "
-                    "require_first_run_approval=True"
+                    "security_profile='high_consequence' requires require_first_run_approval=True"
                 )
             if self.auto_approve_first_seen:
                 raise ValueError(
-                    "security_profile='high_consequence' forbids "
-                    "auto_approve_first_seen=True"
+                    "security_profile='high_consequence' forbids auto_approve_first_seen=True"
                 )
         return self
 
@@ -402,15 +402,11 @@ def load_config(path: str | Path) -> BridgeConfig:
         capabilities: dict[str, dict[str, ToolCapabilityManifest]] = {}
         for server_name, tools in capabilities_raw.items():
             if not isinstance(tools, dict):
-                raise ConfigError(
-                    f"capabilities.{server_name} must be a table of tool configs"
-                )
+                raise ConfigError(f"capabilities.{server_name} must be a table of tool configs")
             capabilities[server_name] = {}
             for tool_name, cap_fields in tools.items():
                 if not isinstance(cap_fields, dict):
-                    raise ConfigError(
-                        f"capabilities.{server_name}.{tool_name} must be a table"
-                    )
+                    raise ConfigError(f"capabilities.{server_name}.{tool_name} must be a table")
                 capabilities[server_name][tool_name] = ToolCapabilityManifest(
                     source=CapabilitySource.CONFIG,
                     **cap_fields,
@@ -420,9 +416,7 @@ def load_config(path: str | Path) -> BridgeConfig:
         destinations: dict[str, dict[str, list[DestinationPolicy]]] = {}
         for server_name, tools in destinations_raw.items():
             if not isinstance(tools, dict):
-                raise ConfigError(
-                    f"destinations.{server_name} must be a table of tool configs"
-                )
+                raise ConfigError(f"destinations.{server_name} must be a table of tool configs")
             destinations[server_name] = {}
             for tool_name, policy_data in tools.items():
                 if isinstance(policy_data, list):
@@ -432,43 +426,32 @@ def load_config(path: str | Path) -> BridgeConfig:
                     ]
                 elif isinstance(policy_data, dict):
                     # [destinations.server.tool] — single table
-                    destinations[server_name][tool_name] = [
-                        DestinationPolicy(**policy_data)
-                    ]
+                    destinations[server_name][tool_name] = [DestinationPolicy(**policy_data)]
                 else:
                     raise ConfigError(
-                        f"destinations.{server_name}.{tool_name} "
-                        f"must be a table or array of tables"
+                        f"destinations.{server_name}.{tool_name} must be a table or array of tables"
                     )
 
         # Parse [paths.<server>.<tool>] sections
         paths: dict[str, dict[str, PathPolicy]] = {}
         for server_name, tools in paths_raw.items():
             if not isinstance(tools, dict):
-                raise ConfigError(
-                    f"paths.{server_name} must be a table of tool configs"
-                )
+                raise ConfigError(f"paths.{server_name} must be a table of tool configs")
             paths[server_name] = {}
             for tool_name, path_fields in tools.items():
                 if not isinstance(path_fields, dict):
-                    raise ConfigError(
-                        f"paths.{server_name}.{tool_name} must be a table"
-                    )
+                    raise ConfigError(f"paths.{server_name}.{tool_name} must be a table")
                 paths[server_name][tool_name] = PathPolicy(**path_fields)
 
         # Parse [recipients.<server>.<tool>] sections
         recipients: dict[str, dict[str, RecipientPolicy]] = {}
         for server_name, tools in recipients_raw.items():
             if not isinstance(tools, dict):
-                raise ConfigError(
-                    f"recipients.{server_name} must be a table of tool configs"
-                )
+                raise ConfigError(f"recipients.{server_name} must be a table of tool configs")
             recipients[server_name] = {}
             for tool_name, recip_fields in tools.items():
                 if not isinstance(recip_fields, dict):
-                    raise ConfigError(
-                        f"recipients.{server_name}.{tool_name} must be a table"
-                    )
+                    raise ConfigError(f"recipients.{server_name}.{tool_name} must be a table")
                 recipients[server_name][tool_name] = RecipientPolicy(**recip_fields)
 
         # Auto-convert allowed_path_roots to global path policy
@@ -506,14 +489,16 @@ def load_config(path: str | Path) -> BridgeConfig:
             for domain in security.allowed_outbound_domains:
                 # Generate both https and http to match current scheme-agnostic behavior
                 for scheme in ("https", "http"):
-                    global_policies.append(DestinationPolicy(
-                        host=domain,
-                        scheme=scheme,
-                        allow_subdomains=True,
-                        allow_ip_literals=False,
-                        allow_private_ranges=False,
-                        allow_redirects=False,
-                    ))
+                    global_policies.append(
+                        DestinationPolicy(
+                            host=domain,
+                            scheme=scheme,
+                            allow_subdomains=True,
+                            allow_ip_literals=False,
+                            allow_private_ranges=False,
+                            allow_redirects=False,
+                        )
+                    )
             destinations.setdefault("_global", {})["_all"] = global_policies
 
         return BridgeConfig(

@@ -23,9 +23,7 @@ from ollama_mcp_bridge.types import (
     SourceType,
     TrustLevel,
 )
-
 from tests.helpers import ADVERSARIAL_MCP_SERVER, requires_ollama
-
 
 # --- Direct Pipeline Tests (no model needed, fast) ---
 
@@ -200,10 +198,7 @@ class TestAdversarialResultSanitization:
         )
         result = await gateway.execute_tool(tc, model_id="test", turn=0)
 
-        assert any(
-            "provenance_amplified" in s
-            for s in result.risk_assessment.raw_signals
-        )
+        assert any("provenance_amplified" in s for s in result.risk_assessment.raw_signals)
 
 
 # --- Model-in-the-loop Adversarial Tests (slow) ---
@@ -239,10 +234,7 @@ class TestAdversarialWithModel:
 
         assert not result.truncated, "Conversation truncated — result is incomplete"
         if result.tool_calls:
-            tool_call_events = [
-                e for e in result.audit_log
-                if e.event_type.value == "tool_call"
-            ]
+            tool_call_events = [e for e in result.audit_log if e.event_type.value == "tool_call"]
             assert len(tool_call_events) >= 1
 
     @pytest.mark.asyncio
@@ -477,8 +469,7 @@ class TestAdversarialSinkPolicy:
         if "tainted_sink_blocked" in event_types:
             # Model followed the injection → sink policy caught it
             blocked = [
-                e for e in result.audit_log
-                if e.event_type == AuditEventType.TAINTED_SINK_BLOCKED
+                e for e in result.audit_log if e.event_type == AuditEventType.TAINTED_SINK_BLOCKED
             ]
             assert len(blocked) >= 1
             assert "evil.example.com" in blocked[0].reason or "adversarial" in blocked[0].reason
@@ -517,7 +508,6 @@ class TestAdversarialSinkPolicy:
         if "tainted_sink_blocked" in event_types:
             # Sink policy fired — tainted URL was caught
             blocked = [
-                e for e in result.audit_log
-                if e.event_type == AuditEventType.TAINTED_SINK_BLOCKED
+                e for e in result.audit_log if e.event_type == AuditEventType.TAINTED_SINK_BLOCKED
             ]
             assert len(blocked) >= 1

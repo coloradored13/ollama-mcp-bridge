@@ -64,7 +64,11 @@ class TestMCPApprovalFlow:
         pending = await bridge.list_pending_tool_approvals()
         assert len(pending) == 5
         assert {p.name for p in pending} == {
-            "echo", "add", "get_secret", "flaky_tool", "slow_tool",
+            "echo",
+            "add",
+            "get_secret",
+            "flaky_tool",
+            "slow_tool",
         }
         assert len(bridge._security.get_approved_tools()) == 0
 
@@ -79,12 +83,17 @@ class TestMCPApprovalFlow:
             return {p.key: True for p in pending}
 
         bridge = await live_bridge(
-            auto_approve=False, require_approval=True,
+            auto_approve=False,
+            require_approval=True,
             approval_callback=approve_all,
         )
 
         assert set(approved_names) == {
-            "echo", "add", "get_secret", "flaky_tool", "slow_tool",
+            "echo",
+            "add",
+            "get_secret",
+            "flaky_tool",
+            "slow_tool",
         }
         assert len(bridge._security.get_approved_tools()) == 5
         assert len(await bridge.list_pending_tool_approvals()) == 0
@@ -92,11 +101,13 @@ class TestMCPApprovalFlow:
     @pytest.mark.asyncio
     async def test_selective_approval(self, live_bridge):
         """Approve some tools, deny others."""
+
         async def approve_echo_only(pending):
             return {p.key: (p.name == "echo") for p in pending}
 
         bridge = await live_bridge(
-            auto_approve=False, require_approval=True,
+            auto_approve=False,
+            require_approval=True,
             approval_callback=approve_echo_only,
         )
 

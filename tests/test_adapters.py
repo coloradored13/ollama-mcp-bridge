@@ -1,18 +1,15 @@
 """Tests for adapters.py — safe argument adapters for capability narrowing."""
 
-import pytest
-
 from ollama_mcp_bridge.adapters import (
     SafeMemoryWriteCandidate,
     SafePath,
     SafeRecipient,
     SafeURL,
-    run_adapters,
     _extract_paths_from_args,
+    run_adapters,
 )
 from ollama_mcp_bridge.config import SecurityConfig
 from ollama_mcp_bridge.types import ActionClass, ApprovedTool
-
 
 # --- Helpers ---
 
@@ -48,21 +45,27 @@ class TestSafeURL:
     def test_disabled_when_no_domains_configured(self):
         config = SecurityConfig()
         errors = self.adapter.check(
-            self.tool, {"url": "https://evil.com"}, config,
+            self.tool,
+            {"url": "https://evil.com"},
+            config,
         )
         assert errors == []
 
     def test_approved_domain_passes(self):
         config = SecurityConfig(allowed_outbound_domains=["example.com"])
         errors = self.adapter.check(
-            self.tool, {"url": "https://example.com/api"}, config,
+            self.tool,
+            {"url": "https://example.com/api"},
+            config,
         )
         assert errors == []
 
     def test_unapproved_domain_rejected(self):
         config = SecurityConfig(allowed_outbound_domains=["example.com"])
         errors = self.adapter.check(
-            self.tool, {"url": "https://evil.com/exfil"}, config,
+            self.tool,
+            {"url": "https://evil.com/exfil"},
+            config,
         )
         assert len(errors) == 1
         assert "evil.com" in errors[0]
@@ -71,7 +74,9 @@ class TestSafeURL:
     def test_subdomain_of_approved_passes(self):
         config = SecurityConfig(allowed_outbound_domains=["example.com"])
         errors = self.adapter.check(
-            self.tool, {"url": "https://api.example.com/v1"}, config,
+            self.tool,
+            {"url": "https://api.example.com/v1"},
+            config,
         )
         assert errors == []
 
@@ -97,7 +102,9 @@ class TestSafeURL:
     def test_no_urls_in_args_passes(self):
         config = SecurityConfig(allowed_outbound_domains=["safe.com"])
         errors = self.adapter.check(
-            self.tool, {"query": "hello world"}, config,
+            self.tool,
+            {"query": "hello world"},
+            config,
         )
         assert errors == []
 
@@ -127,21 +134,27 @@ class TestSafePath:
     def test_disabled_when_no_roots_configured(self):
         config = SecurityConfig()
         errors = self.adapter.check(
-            self.tool, {"path": "/etc/passwd"}, config,
+            self.tool,
+            {"path": "/etc/passwd"},
+            config,
         )
         assert errors == []
 
     def test_path_within_allowed_root_passes(self):
         config = SecurityConfig(allowed_path_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "/tmp/sandbox/file.txt"}, config,
+            self.tool,
+            {"path": "/tmp/sandbox/file.txt"},
+            config,
         )
         assert errors == []
 
     def test_path_outside_allowed_root_rejected(self):
         config = SecurityConfig(allowed_path_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "/etc/passwd"}, config,
+            self.tool,
+            {"path": "/etc/passwd"},
+            config,
         )
         assert len(errors) == 1
         assert "outside allowed roots" in errors[0]
@@ -149,7 +162,9 @@ class TestSafePath:
     def test_traversal_attack_rejected(self):
         config = SecurityConfig(allowed_path_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "/tmp/sandbox/../../etc/passwd"}, config,
+            self.tool,
+            {"path": "/tmp/sandbox/../../etc/passwd"},
+            config,
         )
         assert len(errors) == 1
         assert "outside allowed roots" in errors[0]
@@ -158,7 +173,9 @@ class TestSafePath:
         config = SecurityConfig(allowed_path_roots=["~/safe"])
         # ~/safe/file.txt should pass (both sides expand ~)
         errors = self.adapter.check(
-            self.tool, {"path": "~/safe/file.txt"}, config,
+            self.tool,
+            {"path": "~/safe/file.txt"},
+            config,
         )
         assert errors == []
 
@@ -176,21 +193,27 @@ class TestSafePath:
     def test_no_paths_in_args_passes(self):
         config = SecurityConfig(allowed_path_roots=["/tmp"])
         errors = self.adapter.check(
-            self.tool, {"query": "hello world"}, config,
+            self.tool,
+            {"query": "hello world"},
+            config,
         )
         assert errors == []
 
     def test_relative_traversal_rejected(self):
         config = SecurityConfig(allowed_path_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "../../../etc/shadow"}, config,
+            self.tool,
+            {"path": "../../../etc/shadow"},
+            config,
         )
         assert len(errors) == 1
 
     def test_exact_root_path_passes(self):
         config = SecurityConfig(allowed_path_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "/tmp/sandbox"}, config,
+            self.tool,
+            {"path": "/tmp/sandbox"},
+            config,
         )
         assert errors == []
 
@@ -206,21 +229,27 @@ class TestSafeRecipient:
     def test_disabled_when_no_recipients_configured(self):
         config = SecurityConfig()
         errors = self.adapter.check(
-            self.tool, {"to": "anyone@anywhere.com"}, config,
+            self.tool,
+            {"to": "anyone@anywhere.com"},
+            config,
         )
         assert errors == []
 
     def test_approved_recipient_passes(self):
         config = SecurityConfig(approved_recipients=["admin@example.com"])
         errors = self.adapter.check(
-            self.tool, {"to": "admin@example.com"}, config,
+            self.tool,
+            {"to": "admin@example.com"},
+            config,
         )
         assert errors == []
 
     def test_unapproved_recipient_rejected(self):
         config = SecurityConfig(approved_recipients=["admin@example.com"])
         errors = self.adapter.check(
-            self.tool, {"to": "attacker@evil.com"}, config,
+            self.tool,
+            {"to": "attacker@evil.com"},
+            config,
         )
         assert len(errors) == 1
         assert "attacker@evil.com" in errors[0]
@@ -228,7 +257,9 @@ class TestSafeRecipient:
     def test_case_insensitive(self):
         config = SecurityConfig(approved_recipients=["Admin@Example.com"])
         errors = self.adapter.check(
-            self.tool, {"to": "admin@example.com"}, config,
+            self.tool,
+            {"to": "admin@example.com"},
+            config,
         )
         assert errors == []
 
@@ -247,7 +278,9 @@ class TestSafeRecipient:
     def test_no_emails_in_args_passes(self):
         config = SecurityConfig(approved_recipients=["admin@example.com"])
         errors = self.adapter.check(
-            self.tool, {"query": "hello world"}, config,
+            self.tool,
+            {"query": "hello world"},
+            config,
         )
         assert errors == []
 
@@ -301,7 +334,9 @@ class TestSafeMemoryWriteCandidate:
         config = SecurityConfig()
         # Content under 20 chars is skipped
         errors = self.adapter.check(
-            tool, {"content": "SYSTEM: evil"}, config,
+            tool,
+            {"content": "SYSTEM: evil"},
+            config,
         )
         assert errors == []
 
@@ -348,9 +383,11 @@ class TestPathExtraction:
         assert results == []
 
     def test_nested_path(self):
-        results = _extract_paths_from_args({
-            "config": {"file": "/etc/config.yml"},
-        })
+        results = _extract_paths_from_args(
+            {
+                "config": {"file": "/etc/config.yml"},
+            }
+        )
         paths = [p for _, p in results]
         assert "/etc/config.yml" in paths
 
@@ -436,7 +473,9 @@ class TestRunAdapters:
         tool = _make_tool()
         config = SecurityConfig(allowed_outbound_domains=["safe.com"])
         errors = run_adapters(
-            tool, {"url": "https://evil.com/exfil"}, config,
+            tool,
+            {"url": "https://evil.com/exfil"},
+            config,
         )
         assert len(errors) >= 1
         assert "safe_url" in errors[0]
@@ -475,7 +514,9 @@ class TestSafeURLDestinationPolicies:
     def test_url_matching_policy_passes(self):
         policies = [DestinationPolicy(host="api.example.com")]
         errors = self.adapter.check(
-            self.tool, {"url": "https://api.example.com/v1"}, self.config,
+            self.tool,
+            {"url": "https://api.example.com/v1"},
+            self.config,
             destination_policies=policies,
         )
         assert errors == []
@@ -483,7 +524,9 @@ class TestSafeURLDestinationPolicies:
     def test_url_not_matching_policy_rejected(self):
         policies = [DestinationPolicy(host="api.example.com")]
         errors = self.adapter.check(
-            self.tool, {"url": "https://evil.com/exfil"}, self.config,
+            self.tool,
+            {"url": "https://evil.com/exfil"},
+            self.config,
             destination_policies=policies,
         )
         assert len(errors) == 1
@@ -492,18 +535,25 @@ class TestSafeURLDestinationPolicies:
     def test_scheme_mismatch_rejected(self):
         policies = [DestinationPolicy(host="api.example.com", scheme="https")]
         errors = self.adapter.check(
-            self.tool, {"url": "http://api.example.com/v1"}, self.config,
+            self.tool,
+            {"url": "http://api.example.com/v1"},
+            self.config,
             destination_policies=policies,
         )
         assert len(errors) == 1
         assert "scheme" in errors[0]
 
     def test_path_prefix_enforced(self):
-        policies = [DestinationPolicy(
-            host="api.example.com", path_prefixes=["/v1/"],
-        )]
+        policies = [
+            DestinationPolicy(
+                host="api.example.com",
+                path_prefixes=["/v1/"],
+            )
+        ]
         errors = self.adapter.check(
-            self.tool, {"url": "https://api.example.com/admin/secret"}, self.config,
+            self.tool,
+            {"url": "https://api.example.com/admin/secret"},
+            self.config,
             destination_policies=policies,
         )
         assert len(errors) == 1
@@ -512,7 +562,9 @@ class TestSafeURLDestinationPolicies:
     def test_port_enforced(self):
         policies = [DestinationPolicy(host="api.example.com", port=8443)]
         errors = self.adapter.check(
-            self.tool, {"url": "https://api.example.com:9999/v1"}, self.config,
+            self.tool,
+            {"url": "https://api.example.com:9999/v1"},
+            self.config,
             destination_policies=policies,
         )
         assert len(errors) == 1
@@ -521,7 +573,9 @@ class TestSafeURLDestinationPolicies:
     def test_ip_literal_blocked(self):
         policies = [DestinationPolicy(host="10.0.0.1")]
         errors = self.adapter.check(
-            self.tool, {"url": "https://10.0.0.1/api"}, self.config,
+            self.tool,
+            {"url": "https://10.0.0.1/api"},
+            self.config,
             destination_policies=policies,
         )
         assert len(errors) == 1
@@ -533,7 +587,9 @@ class TestSafeURLDestinationPolicies:
             DestinationPolicy(host="partner.example.com"),
         ]
         errors = self.adapter.check(
-            self.tool, {"url": "https://partner.example.com/hook"}, self.config,
+            self.tool,
+            {"url": "https://partner.example.com/hook"},
+            self.config,
             destination_policies=policies,
         )
         assert errors == []
@@ -551,7 +607,9 @@ class TestSafeURLDestinationPolicies:
             capabilities=ToolCapabilityManifest(outbound_data_transfer=True),
         )
         errors = self.adapter.check(
-            tool, {"url": "https://evil.com/exfil"}, config,
+            tool,
+            {"url": "https://evil.com/exfil"},
+            config,
             destination_policies=None,
         )
         assert len(errors) == 1
@@ -570,7 +628,9 @@ class TestSafeURLDestinationPolicies:
             capabilities=ToolCapabilityManifest(outbound_data_transfer=True),
         )
         errors = self.adapter.check(
-            tool, {"data": "just plain text"}, config,
+            tool,
+            {"data": "just plain text"},
+            config,
             destination_policies=None,
         )
         assert errors == []
@@ -590,7 +650,9 @@ class TestSafeURLDestinationPolicies:
         """Without destination_policies, falls back to allowed_outbound_domains."""
         config = SecurityConfig(allowed_outbound_domains=["example.com"])
         errors = self.adapter.check(
-            self.tool, {"url": "https://example.com/api"}, config,
+            self.tool,
+            {"url": "https://example.com/api"},
+            config,
             destination_policies=None,
         )
         assert errors == []
@@ -599,7 +661,7 @@ class TestSafeURLDestinationPolicies:
 # --- SafePath PathPolicy tests ---
 
 
-from ollama_mcp_bridge.types import PathPolicy, RecipientPolicy, ToolCapabilityManifest
+from ollama_mcp_bridge.types import PathPolicy, RecipientPolicy
 
 
 class TestSafePathWithPathPolicy:
@@ -613,7 +675,9 @@ class TestSafePathWithPathPolicy:
     def test_path_matching_policy_passes(self):
         policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "/tmp/sandbox/file.txt"}, self.config,
+            self.tool,
+            {"path": "/tmp/sandbox/file.txt"},
+            self.config,
             path_policy=policy,
         )
         assert errors == []
@@ -621,7 +685,9 @@ class TestSafePathWithPathPolicy:
     def test_path_outside_policy_rejected(self):
         policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "/etc/passwd"}, self.config,
+            self.tool,
+            {"path": "/etc/passwd"},
+            self.config,
             path_policy=policy,
         )
         assert len(errors) == 1
@@ -630,7 +696,9 @@ class TestSafePathWithPathPolicy:
     def test_traversal_attack_via_policy(self):
         policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "/tmp/sandbox/../../etc/passwd"}, self.config,
+            self.tool,
+            {"path": "/tmp/sandbox/../../etc/passwd"},
+            self.config,
             path_policy=policy,
         )
         assert len(errors) == 1
@@ -639,7 +707,9 @@ class TestSafePathWithPathPolicy:
     def test_relative_path_rejected_by_policy(self):
         policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "../../../etc/shadow"}, self.config,
+            self.tool,
+            {"path": "../../../etc/shadow"},
+            self.config,
             path_policy=policy,
         )
         assert len(errors) == 1
@@ -648,7 +718,9 @@ class TestSafePathWithPathPolicy:
     def test_glob_rejected_by_policy(self):
         policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "/tmp/sandbox/*.txt"}, self.config,
+            self.tool,
+            {"path": "/tmp/sandbox/*.txt"},
+            self.config,
             path_policy=policy,
         )
         assert len(errors) == 1
@@ -660,7 +732,9 @@ class TestSafePathWithPathPolicy:
             extensions_allowlist=[".txt", ".md"],
         )
         errors = self.adapter.check(
-            self.tool, {"path": "/tmp/sandbox/evil.sh"}, self.config,
+            self.tool,
+            {"path": "/tmp/sandbox/evil.sh"},
+            self.config,
             path_policy=policy,
         )
         assert len(errors) == 1
@@ -669,14 +743,19 @@ class TestSafePathWithPathPolicy:
     def test_read_only_blocks_write_tool(self):
         caps = ToolCapabilityManifest(filesystem_write=True)
         tool = ApprovedTool(
-            server="test-server", name="write_file",
-            description="Writes files", input_schema=_SCHEMA,
-            classification=ActionClass.WRITE, definition_hash="abc123",
+            server="test-server",
+            name="write_file",
+            description="Writes files",
+            input_schema=_SCHEMA,
+            classification=ActionClass.WRITE,
+            definition_hash="abc123",
             capabilities=caps,
         )
         policy = PathPolicy(allowed_roots=["/tmp/sandbox"], read_only=True)
         errors = self.adapter.check(
-            tool, {"path": "/tmp/sandbox/file.txt"}, self.config,
+            tool,
+            {"path": "/tmp/sandbox/file.txt"},
+            self.config,
             path_policy=policy,
         )
         assert len(errors) == 1
@@ -698,7 +777,9 @@ class TestSafePathWithPathPolicy:
         config = SecurityConfig(allowed_path_roots=["/tmp/legacy"])
         policy = PathPolicy(allowed_roots=["/tmp/new"])
         errors = self.adapter.check(
-            self.tool, {"path": "/tmp/new/file.txt"}, config,
+            self.tool,
+            {"path": "/tmp/new/file.txt"},
+            config,
             path_policy=policy,
         )
         assert errors == []
@@ -707,7 +788,9 @@ class TestSafePathWithPathPolicy:
         """Without path_policy, falls back to allowed_path_roots."""
         config = SecurityConfig(allowed_path_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"path": "/tmp/sandbox/file.txt"}, config,
+            self.tool,
+            {"path": "/tmp/sandbox/file.txt"},
+            config,
             path_policy=None,
         )
         assert errors == []
@@ -715,7 +798,9 @@ class TestSafePathWithPathPolicy:
     def test_no_paths_in_args_passes(self):
         policy = PathPolicy(allowed_roots=["/tmp/sandbox"])
         errors = self.adapter.check(
-            self.tool, {"query": "hello world"}, self.config,
+            self.tool,
+            {"query": "hello world"},
+            self.config,
             path_policy=policy,
         )
         assert errors == []
@@ -746,7 +831,9 @@ class TestSafeRecipientWithRecipientPolicy:
     def test_approved_address_passes(self):
         policy = RecipientPolicy(approved_addresses=["admin@example.com"])
         errors = self.adapter.check(
-            self.tool, {"to": "admin@example.com"}, self.config,
+            self.tool,
+            {"to": "admin@example.com"},
+            self.config,
             recipient_policy=policy,
         )
         assert errors == []
@@ -754,7 +841,9 @@ class TestSafeRecipientWithRecipientPolicy:
     def test_unapproved_address_rejected(self):
         policy = RecipientPolicy(approved_addresses=["admin@example.com"])
         errors = self.adapter.check(
-            self.tool, {"to": "attacker@evil.com"}, self.config,
+            self.tool,
+            {"to": "attacker@evil.com"},
+            self.config,
             recipient_policy=policy,
         )
         assert len(errors) == 1
@@ -763,7 +852,9 @@ class TestSafeRecipientWithRecipientPolicy:
     def test_domain_match_passes(self):
         policy = RecipientPolicy(approved_domains=["internal.corp"])
         errors = self.adapter.check(
-            self.tool, {"to": "anyone@internal.corp"}, self.config,
+            self.tool,
+            {"to": "anyone@internal.corp"},
+            self.config,
             recipient_policy=policy,
         )
         assert errors == []
@@ -771,7 +862,9 @@ class TestSafeRecipientWithRecipientPolicy:
     def test_domain_match_rejects_external(self):
         policy = RecipientPolicy(approved_domains=["internal.corp"])
         errors = self.adapter.check(
-            self.tool, {"to": "evil@external.com"}, self.config,
+            self.tool,
+            {"to": "evil@external.com"},
+            self.config,
             recipient_policy=policy,
         )
         assert len(errors) == 1
@@ -781,7 +874,9 @@ class TestSafeRecipientWithRecipientPolicy:
             identity_groups={"eng": ["alice@co.com", "bob@co.com"]},
         )
         errors = self.adapter.check(
-            self.tool, {"to": "alice@co.com"}, self.config,
+            self.tool,
+            {"to": "alice@co.com"},
+            self.config,
             recipient_policy=policy,
         )
         assert errors == []
@@ -791,7 +886,9 @@ class TestSafeRecipientWithRecipientPolicy:
             identity_groups={"eng": ["alice@co.com"]},
         )
         errors = self.adapter.check(
-            self.tool, {"to": "stranger@co.com"}, self.config,
+            self.tool,
+            {"to": "stranger@co.com"},
+            self.config,
             recipient_policy=policy,
         )
         assert len(errors) == 1
@@ -800,7 +897,9 @@ class TestSafeRecipientWithRecipientPolicy:
         """internal_only with no approved addresses/domains should error."""
         policy = RecipientPolicy(internal_only=True)
         errors = self.adapter.check(
-            self.tool, {"to": "anyone@anywhere.com"}, self.config,
+            self.tool,
+            {"to": "anyone@anywhere.com"},
+            self.config,
             recipient_policy=policy,
         )
         assert len(errors) == 1
@@ -812,7 +911,9 @@ class TestSafeRecipientWithRecipientPolicy:
             internal_only=True,
         )
         errors = self.adapter.check(
-            self.tool, {"to": "user@internal.corp"}, self.config,
+            self.tool,
+            {"to": "user@internal.corp"},
+            self.config,
             recipient_policy=policy,
         )
         assert errors == []
@@ -823,7 +924,9 @@ class TestSafeRecipientWithRecipientPolicy:
             internal_only=True,
         )
         errors = self.adapter.check(
-            self.tool, {"to": "user@external.com"}, self.config,
+            self.tool,
+            {"to": "user@external.com"},
+            self.config,
             recipient_policy=policy,
         )
         assert len(errors) == 1
@@ -831,7 +934,9 @@ class TestSafeRecipientWithRecipientPolicy:
     def test_case_insensitive(self):
         policy = RecipientPolicy(approved_addresses=["Admin@EXAMPLE.com"])
         errors = self.adapter.check(
-            self.tool, {"to": "admin@example.com"}, self.config,
+            self.tool,
+            {"to": "admin@example.com"},
+            self.config,
             recipient_policy=policy,
         )
         assert errors == []
@@ -852,7 +957,9 @@ class TestSafeRecipientWithRecipientPolicy:
         config = SecurityConfig(approved_recipients=["old@legacy.com"])
         policy = RecipientPolicy(approved_addresses=["new@modern.com"])
         errors = self.adapter.check(
-            self.tool, {"to": "new@modern.com"}, config,
+            self.tool,
+            {"to": "new@modern.com"},
+            config,
             recipient_policy=policy,
         )
         assert errors == []
@@ -861,7 +968,9 @@ class TestSafeRecipientWithRecipientPolicy:
         """Without recipient_policy, falls back to approved_recipients."""
         config = SecurityConfig(approved_recipients=["admin@example.com"])
         errors = self.adapter.check(
-            self.tool, {"to": "admin@example.com"}, config,
+            self.tool,
+            {"to": "admin@example.com"},
+            config,
             recipient_policy=None,
         )
         assert errors == []
@@ -869,7 +978,9 @@ class TestSafeRecipientWithRecipientPolicy:
     def test_no_emails_in_args_passes(self):
         policy = RecipientPolicy(approved_addresses=["admin@example.com"])
         errors = self.adapter.check(
-            self.tool, {"query": "hello world"}, self.config,
+            self.tool,
+            {"query": "hello world"},
+            self.config,
             recipient_policy=policy,
         )
         assert errors == []

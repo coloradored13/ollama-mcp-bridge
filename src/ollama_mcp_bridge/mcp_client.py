@@ -104,9 +104,7 @@ class MCPClientManager:
             raise MCPConnectionError(f"No configuration for server '{name}'")
 
         if len(self._connections) >= self._max_servers:
-            raise MCPConnectionError(
-                f"Maximum concurrent servers ({self._max_servers}) reached"
-            )
+            raise MCPConnectionError(f"Maximum concurrent servers ({self._max_servers}) reached")
 
         conn = ServerConnection(name=name, config=config)
 
@@ -132,9 +130,7 @@ class MCPClientManager:
             # ClientSession handles the JSON-RPC protocol: framing, request/response
             # matching, capability negotiation. initialize() performs the MCP handshake
             # (protocol version, server capabilities, etc.).
-            session = await conn.stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
+            session = await conn.stack.enter_async_context(ClientSession(read_stream, write_stream))
             await asyncio.wait_for(session.initialize(), timeout=CONNECTION_TIMEOUT)
 
             conn.session = session
@@ -153,9 +149,7 @@ class MCPClientManager:
             ]
 
             self._connections[name] = conn
-            logger.info(
-                "Connected to MCP server '%s' (%d tools)", name, len(conn.tools)
-            )
+            logger.info("Connected to MCP server '%s' (%d tools)", name, len(conn.tools))
 
         except asyncio.TimeoutError:
             await conn.stack.aclose()
@@ -165,9 +159,7 @@ class MCPClientManager:
             )
         except Exception as e:
             await conn.stack.aclose()
-            raise MCPConnectionError(
-                f"Failed to connect to server '{name}': {e}"
-            ) from e
+            raise MCPConnectionError(f"Failed to connect to server '{name}': {e}") from e
 
     async def disconnect(self, name: str) -> None:
         """Disconnect from a named MCP server."""
@@ -262,9 +254,7 @@ class MCPClientManager:
             return "\n".join(text_parts) if text_parts else ""
 
         except asyncio.TimeoutError:
-            raise MCPTimeoutError(
-                f"Tool '{tool}' on '{server}' timed out after {timeout}s"
-            )
+            raise MCPTimeoutError(f"Tool '{tool}' on '{server}' timed out after {timeout}s")
         except (MCPToolError, MCPTimeoutError):
             raise
         except Exception as e:

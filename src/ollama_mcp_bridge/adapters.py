@@ -33,7 +33,13 @@ from urllib.parse import urlparse
 
 from .config import SecurityConfig
 from .sink_policy import _extract_values_from_args, _is_memory_write_tool
-from .types import ApprovedTool, DestinationPolicy, PathPolicy, RecipientPolicy, normalize_and_validate_ip
+from .types import (
+    ApprovedTool,
+    DestinationPolicy,
+    PathPolicy,
+    RecipientPolicy,
+    normalize_and_validate_ip,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +56,21 @@ _PATH_PATTERN = re.compile(
 # When a field's name is in this set, its string value is treated as a path
 # candidate regardless of whether it contains a slash (bare filenames like
 # "db.sqlite" or ".env" are caught this way).
-_FILESYSTEM_FIELD_NAMES: frozenset[str] = frozenset({
-    "file", "filename", "path", "filepath", "source_file", "dest_file",
-    "output_file", "input_file", "config_file", "db", "database",
-})
+_FILESYSTEM_FIELD_NAMES: frozenset[str] = frozenset(
+    {
+        "file",
+        "filename",
+        "path",
+        "filepath",
+        "source_file",
+        "dest_file",
+        "output_file",
+        "input_file",
+        "config_file",
+        "db",
+        "database",
+    }
+)
 
 # Negative filter patterns — values matching these are NOT treated as paths
 # even in filesystem-named fields, to avoid double-reporting with URL/recipient adapters.
@@ -65,14 +82,13 @@ _IP_SIMPLE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
 def _is_non_path_value(value: str) -> bool:
     """Return True if value is clearly a URL, email, or IP — not a file path."""
     return bool(
-        _URL_PREFIX.match(value)
-        or _EMAIL_PATTERN_SIMPLE.match(value)
-        or _IP_SIMPLE.match(value)
+        _URL_PREFIX.match(value) or _EMAIL_PATTERN_SIMPLE.match(value) or _IP_SIMPLE.match(value)
     )
 
 
 def _extract_paths_from_args(
-    args: dict[str, Any], prefix: str = "",
+    args: dict[str, Any],
+    prefix: str = "",
 ) -> list[tuple[str, str]]:
     """Recursively extract file path strings from arguments.
 
@@ -106,9 +122,7 @@ def _extract_paths_from_args(
                     if item.startswith(("/", "./", "../", "~/")):
                         results.append((item_prefix, item))
                 elif isinstance(item, dict):
-                    results.extend(
-                        _extract_paths_from_args(item, prefix=item_prefix)
-                    )
+                    results.extend(_extract_paths_from_args(item, prefix=item_prefix))
 
     # Deduplicate while preserving order
     seen: set[tuple[str, str]] = set()
@@ -182,9 +196,7 @@ class SafeURL:
                 continue
 
             if not host:
-                errors.append(
-                    f"[{self.name}] Field '{field_name}': URL has no hostname"
-                )
+                errors.append(f"[{self.name}] Field '{field_name}': URL has no hostname")
                 continue
 
             if not any(
@@ -326,8 +338,7 @@ class SafePath:
 
         # Normalize allowed roots
         normalized_roots = [
-            os.path.normpath(os.path.expanduser(r))
-            for r in config.allowed_path_roots
+            os.path.normpath(os.path.expanduser(r)) for r in config.allowed_path_roots
         ]
 
         for field_name, raw_path in path_entries:
@@ -360,9 +371,7 @@ class SafePath:
         for field_name, raw_path in path_entries:
             result = policy.validate_path(raw_path, tool.capabilities)
             if not result.matched:
-                errors.append(
-                    f"[{self.name}] Field '{field_name}': {result.failure_reason}"
-                )
+                errors.append(f"[{self.name}] Field '{field_name}': {result.failure_reason}")
 
         return errors
 
@@ -436,9 +445,7 @@ class SafeRecipient:
 
             result = policy.validate_recipient(ev.value)
             if not result.matched:
-                errors.append(
-                    f"[{self.name}] Field '{field_name}': {result.failure_reason}"
-                )
+                errors.append(f"[{self.name}] Field '{field_name}': {result.failure_reason}")
 
         return errors
 

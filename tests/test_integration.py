@@ -15,7 +15,7 @@ DA GAP-2: AgentLoop multi-turn flow — mock Ollama returns tool_call,
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -38,6 +38,7 @@ from ollama_mcp_bridge.types import (
     ActionClass,
     ApprovalMode,
     ApprovedTool,
+    AuditEntry,
     AuditEventType,
     CapabilitySource,
     ConfirmationOutcome,
@@ -47,14 +48,12 @@ from ollama_mcp_bridge.types import (
     ResultSanitizationTier,
     ScanResult,
     SourceType,
-    StreamEvent,
     StreamEventType,
     ToolCapabilityManifest,
     ToolSchema,
     ToolState,
     TrustLevel,
 )
-
 
 # --- Helpers ---
 
@@ -165,13 +164,11 @@ class TestSecurityGatewayIntegration:
         assert result.duration_ms > 0
 
         # Verify MCP was called with correct args
-        mcp.call_tool.assert_called_once_with(
-            "test-server", "echo", {"input": "hello"}
-        )
+        mcp.call_tool.assert_called_once_with("test-server", "echo", {"input": "hello"})
 
         # Verify audit was written
         audit.flush()
-        entries = audit.get_session_entries()
+        audit.get_session_entries()
         # After flush, buffer is cleared, but the file was written to
 
     @pytest.mark.asyncio
@@ -550,9 +547,13 @@ class TestFirstRunApproval:
         mcp.disconnect_all = AsyncMock()
 
         config = BridgeConfig(
-            servers={"test-server": ServerConfig(
-                command="echo", args=["test"], allowed_tools=["evil"],
-            )},
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=["evil"],
+                )
+            },
             security=SecurityConfig(max_turns=5, sanitization_block_threshold=30.0),
         )
         audit = AuditLogger(
@@ -576,7 +577,8 @@ class TestFirstRunApproval:
         # Pre-register with a different hash (simulating rug pull)
         registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
         old_tool = ToolSchema(
-            server="test-server", name="echo",
+            server="test-server",
+            name="echo",
             description="Original description",
             input_schema={"type": "object", "properties": {"input": {"type": "string"}}},
         )
@@ -907,9 +909,13 @@ class TestApproveToolAPI:
         mcp.disconnect_all = AsyncMock()
 
         config = BridgeConfig(
-            servers={"test-server": ServerConfig(
-                command="echo", args=["test"], allowed_tools=["evil"],
-            )},
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=["evil"],
+                )
+            },
             security=SecurityConfig(max_turns=5, sanitization_block_threshold=30.0),
         )
         audit = AuditLogger(
@@ -926,7 +932,8 @@ class TestApproveToolAPI:
     async def test_profile_block_uses_blocked_profile_state(self, tmp_path):
         """Profile-requirement block → BLOCKED_PROFILE, not BLOCKED_SANITIZATION."""
         mcp = MagicMock(spec=MCPClientManager)
-        # Tool with outbound capability declared via config — hardened profile requires destination policy
+        # Tool with outbound capability declared via config — hardened profile
+        # requires destination policy
         outbound_tool = ToolSchema(
             server="test-server",
             name="fetch_url",
@@ -937,9 +944,13 @@ class TestApproveToolAPI:
         mcp.disconnect_all = AsyncMock()
 
         config = BridgeConfig(
-            servers={"test-server": ServerConfig(
-                command="echo", args=["test"], allowed_tools=["fetch_url"],
-            )},
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=["fetch_url"],
+                )
+            },
             security=SecurityConfig(
                 max_turns=5,
                 security_profile="hardened",
@@ -966,7 +977,8 @@ class TestApproveToolAPI:
         assert scan.total_approved == 0
         assert not scan.has_pending
         states = gateway.get_tool_states()
-        # Must be BLOCKED_PROFILE (profile enforcement), not BLOCKED_SANITIZATION (pattern detection)
+        # Must be BLOCKED_PROFILE (profile enforcement),
+        # not BLOCKED_SANITIZATION (pattern detection)
         assert states["test-server:fetch_url"] == ToolState.BLOCKED_PROFILE
 
     @pytest.mark.asyncio
@@ -983,9 +995,13 @@ class TestApproveToolAPI:
         mcp.disconnect_all = AsyncMock()
 
         config = BridgeConfig(
-            servers={"test-server": ServerConfig(
-                command="echo", args=["test"], allowed_tools=["fetch_url"],
-            )},
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=["fetch_url"],
+                )
+            },
             security=SecurityConfig(
                 max_turns=5,
                 security_profile="hardened",
@@ -1013,7 +1029,8 @@ class TestApproveToolAPI:
 
     @pytest.mark.asyncio
     async def test_sanitization_block_unchanged(self, tmp_path):
-        """Poisoned tool (pattern detection) still gets BLOCKED_SANITIZATION, not BLOCKED_PROFILE."""
+        """Poisoned tool (pattern detection) still gets BLOCKED_SANITIZATION,
+        not BLOCKED_PROFILE."""
         mcp = MagicMock(spec=MCPClientManager)
         poisoned = ToolSchema(
             server="test-server",
@@ -1025,9 +1042,13 @@ class TestApproveToolAPI:
         mcp.disconnect_all = AsyncMock()
 
         config = BridgeConfig(
-            servers={"test-server": ServerConfig(
-                command="echo", args=["test"], allowed_tools=["evil"],
-            )},
+            servers={
+                "test-server": ServerConfig(
+                    command="echo",
+                    args=["test"],
+                    allowed_tools=["evil"],
+                )
+            },
             security=SecurityConfig(max_turns=5, sanitization_block_threshold=30.0),
         )
         audit = AuditLogger(
@@ -1036,7 +1057,7 @@ class TestApproveToolAPI:
         )
         registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
         gateway = SecurityGateway(mcp, config, audit, registry=registry)
-        scan = await gateway.connect_and_scan()
+        await gateway.connect_and_scan()
 
         states = gateway.get_tool_states()
         assert states["test-server:evil"] == ToolState.BLOCKED_SANITIZATION
@@ -1049,7 +1070,8 @@ class TestApproveToolAPI:
         # Pre-register with old hash
         registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
         old_tool = ToolSchema(
-            server="test-server", name="echo",
+            server="test-server",
+            name="echo",
             description="Original description",
             input_schema={"type": "object", "properties": {"input": {"type": "string"}}},
         )
@@ -1057,7 +1079,9 @@ class TestApproveToolAPI:
 
         # MCP returns a different definition (rug pull)
         gateway, _ = _make_fresh_gateway(
-            tmp_path, tool_names=["echo"], registry=registry,
+            tmp_path,
+            tool_names=["echo"],
+            registry=registry,
         )
         scan = await gateway.connect_and_scan()
         assert len(scan.blocked_integrity) == 1
@@ -1097,7 +1121,8 @@ class TestApproveToolAPI:
         # Audit entry carries definition_hash for forensics
         entries = gateway._audit.get_session_entries()
         revoke_events = [
-            e for e in entries
+            e
+            for e in entries
             if e.event_type == AuditEventType.TOOL_DENIED and e.tool_name == "echo"
         ]
         assert len(revoke_events) == 1
@@ -1202,9 +1227,7 @@ class TestAuditFidelity:
         await gateway.connect_and_scan()
 
         entries = gateway._audit.get_session_entries()
-        approved_events = [
-            e for e in entries if e.event_type == AuditEventType.TOOL_FIRST_APPROVED
-        ]
+        approved_events = [e for e in entries if e.event_type == AuditEventType.TOOL_FIRST_APPROVED]
         assert len(approved_events) == 3
         for event in approved_events:
             assert event.approval_mode == ApprovalMode.FIRST_RUN_EXPLICIT.value
@@ -1222,9 +1245,7 @@ class TestAuditFidelity:
         await gateway.connect_and_scan()
 
         entries = gateway._audit.get_session_entries()
-        denied_events = [
-            e for e in entries if e.event_type == AuditEventType.TOOL_FIRST_DENIED
-        ]
+        denied_events = [e for e in entries if e.event_type == AuditEventType.TOOL_FIRST_DENIED]
         assert len(denied_events) == 3
         for event in denied_events:
             assert event.definition_hash != ""
@@ -1248,14 +1269,17 @@ class TestAuditFidelity:
         """Rug-pull detection emits both RUG_PULL_DETECTED and TOOL_REAPPROVAL_REQUIRED."""
         registry = ToolApprovalRegistry(str(tmp_path / "approved.json"))
         old_tool = ToolSchema(
-            server="test-server", name="echo",
+            server="test-server",
+            name="echo",
             description="Original",
             input_schema={"type": "object", "properties": {"input": {"type": "string"}}},
         )
         registry.approve(old_tool)
 
         gateway, _ = _make_fresh_gateway(
-            tmp_path, tool_names=["echo"], registry=registry,
+            tmp_path,
+            tool_names=["echo"],
+            registry=registry,
         )
         await gateway.connect_and_scan()
 
@@ -1282,7 +1306,10 @@ class TestAuditFidelity:
         config.security.require_confirmation_for_destructive = True
         config.security.confirmation_timeout_seconds = 0.01
         gateway, mcp = _make_fresh_gateway(
-            tmp_path, tool_names=tool_names, config=config, registry=registry,
+            tmp_path,
+            tool_names=tool_names,
+            config=config,
+            registry=registry,
         )
         await gateway.connect_and_scan()
 
@@ -1318,7 +1345,10 @@ class TestAuditFidelity:
         config = _make_config()
         config.security.require_confirmation_for_destructive = True
         gateway, mcp = _make_fresh_gateway(
-            tmp_path, tool_names=tool_names, config=config, registry=registry,
+            tmp_path,
+            tool_names=tool_names,
+            config=config,
+            registry=registry,
         )
         await gateway.connect_and_scan()
 
@@ -1349,7 +1379,10 @@ class TestAuditFidelity:
         config = _make_config()
         config.security.require_confirmation_for_destructive = True
         gateway, mcp = _make_fresh_gateway(
-            tmp_path, tool_names=tool_names, config=config, registry=registry,
+            tmp_path,
+            tool_names=tool_names,
+            config=config,
+            registry=registry,
         )
         await gateway.connect_and_scan()
 
@@ -1430,9 +1463,7 @@ class TestAgentLoopIntegration:
         """Model responds with text only — no tool calls, single turn."""
         loop, ollama, security = loop_setup
 
-        ollama.chat = AsyncMock(return_value=_mock_ollama_response(
-            content="The answer is 42."
-        ))
+        ollama.chat = AsyncMock(return_value=_mock_ollama_response(content="The answer is 42."))
 
         result = await loop.execute("What is the answer?", model="test-model")
 
@@ -1459,19 +1490,19 @@ class TestAgentLoopIntegration:
             tool_calls=[{"name": "test-server__recall", "arguments": {"query": "test"}}]
         )
         # Turn 2: model gives final answer
-        turn2_response = _mock_ollama_response(
-            content="Here are your memories: found 3 results."
-        )
+        turn2_response = _mock_ollama_response(content="Here are your memories: found 3 results.")
 
         ollama.chat = AsyncMock(side_effect=[turn1_response, turn2_response])
 
         # SecurityGateway returns a successful execution result
-        security.execute_tool = AsyncMock(return_value=ExecutionResult(
-            content="[TOOL RESULT — EXTERNAL DATA]\nMemory 1, Memory 2, Memory 3",
-            server="test-server",
-            tool_name="recall",
-            duration_ms=15.0,
-        ))
+        security.execute_tool = AsyncMock(
+            return_value=ExecutionResult(
+                content="[TOOL RESULT — EXTERNAL DATA]\nMemory 1, Memory 2, Memory 3",
+                server="test-server",
+                tool_name="recall",
+                duration_ms=15.0,
+            )
+        )
 
         result = await loop.execute("Show my memories", model="test-model")
 
@@ -1559,12 +1590,14 @@ class TestAgentLoopIntegration:
         )
 
         ollama.chat = AsyncMock(return_value=tool_response)
-        security.execute_tool = AsyncMock(return_value=ExecutionResult(
-            content="[TOOL RESULT — EXTERNAL DATA]\nResult",
-            server="test-server",
-            tool_name="recall",
-            duration_ms=5.0,
-        ))
+        security.execute_tool = AsyncMock(
+            return_value=ExecutionResult(
+                content="[TOOL RESULT — EXTERNAL DATA]\nResult",
+                server="test-server",
+                tool_name="recall",
+                duration_ms=5.0,
+            )
+        )
 
         result = await loop.execute("Keep going", model="test-model")
 
@@ -1600,17 +1633,17 @@ class TestAgentLoopIntegration:
             ]
         )
         # Turn 2: final answer
-        turn2_response = _mock_ollama_response(
-            content="Found results from both tools."
-        )
+        turn2_response = _mock_ollama_response(content="Found results from both tools.")
 
         ollama.chat = AsyncMock(side_effect=[turn1_response, turn2_response])
-        security.execute_tool = AsyncMock(return_value=ExecutionResult(
-            content="[TOOL RESULT — EXTERNAL DATA]\nSome result",
-            server="test-server",
-            tool_name="recall",
-            duration_ms=5.0,
-        ))
+        security.execute_tool = AsyncMock(
+            return_value=ExecutionResult(
+                content="[TOOL RESULT — EXTERNAL DATA]\nSome result",
+                server="test-server",
+                tool_name="recall",
+                duration_ms=5.0,
+            )
+        )
 
         result = await loop.execute("Search everything", model="test-model")
 
@@ -1629,19 +1662,21 @@ class TestAgentLoopIntegration:
         turn2 = _mock_ollama_response(content="Done.")
 
         ollama.chat = AsyncMock(side_effect=[turn1, turn2])
-        security.execute_tool = AsyncMock(return_value=ExecutionResult(
-            content="[TOOL RESULT — EXTERNAL DATA]\nOK",
-            server="test-server",
-            tool_name="recall",
-            duration_ms=5.0,
-        ))
+        security.execute_tool = AsyncMock(
+            return_value=ExecutionResult(
+                content="[TOOL RESULT — EXTERNAL DATA]\nOK",
+                server="test-server",
+                tool_name="recall",
+                duration_ms=5.0,
+            )
+        )
 
         events = []
 
         async def capture(event):
             events.append(event)
 
-        result = await loop.execute("Test", model="test-model", on_event=capture)
+        await loop.execute("Test", model="test-model", on_event=capture)
 
         event_types = [e.type.value for e in events]
         assert "tool_call" in event_types
@@ -1665,20 +1700,24 @@ class TestAgentLoopIntegration:
         turn2 = _mock_ollama_response(content="Found it.")
 
         ollama.chat = AsyncMock(side_effect=[turn1, turn2])
-        security.execute_tool = AsyncMock(return_value=ExecutionResult(
-            content="[TOOL RESULT — EXTERNAL DATA]\nData here",
-            server="test-server",
-            tool_name="recall",
-            duration_ms=5.0,
-        ))
+        security.execute_tool = AsyncMock(
+            return_value=ExecutionResult(
+                content="[TOOL RESULT — EXTERNAL DATA]\nData here",
+                server="test-server",
+                tool_name="recall",
+                duration_ms=5.0,
+            )
+        )
 
         await loop.execute("Search", model="test-model")
 
         # Inspect the messages sent to Ollama on the second call.
         # The second call's messages arg should have assistant BEFORE tool result.
         second_call_messages = ollama.chat.call_args_list[1].kwargs.get(
-            "messages", ollama.chat.call_args_list[1].args[1]
-            if len(ollama.chat.call_args_list[1].args) > 1 else []
+            "messages",
+            ollama.chat.call_args_list[1].args[1]
+            if len(ollama.chat.call_args_list[1].args) > 1
+            else [],
         )
 
         # Find the assistant and tool messages after the initial user message
@@ -1709,12 +1748,14 @@ class TestAgentLoopIntegration:
         turn2 = _mock_ollama_response(content="Found it.")
 
         ollama.chat = AsyncMock(side_effect=[turn1, turn2])
-        security.execute_tool = AsyncMock(return_value=ExecutionResult(
-            content="[TOOL RESULT — EXTERNAL DATA]\nData here",
-            server="test-server",
-            tool_name="recall",
-            duration_ms=5.0,
-        ))
+        security.execute_tool = AsyncMock(
+            return_value=ExecutionResult(
+                content="[TOOL RESULT — EXTERNAL DATA]\nData here",
+                server="test-server",
+                tool_name="recall",
+                duration_ms=5.0,
+            )
+        )
 
         await loop.execute("Search", model="test-model")
 
@@ -1761,12 +1802,14 @@ class TestAgentLoopIntegration:
             )
         )
 
-        result = await loop.execute("Test", model="test-model")
+        await loop.execute("Test", model="test-model")
 
         # The error message fed back to model should contain schema hint
         second_call_messages = ollama.chat.call_args_list[1].kwargs.get(
-            "messages", ollama.chat.call_args_list[1].args[1]
-            if len(ollama.chat.call_args_list[1].args) > 1 else []
+            "messages",
+            ollama.chat.call_args_list[1].args[1]
+            if len(ollama.chat.call_args_list[1].args) > 1
+            else [],
         )
         tool_result_msgs = [m for m in second_call_messages if m.get("role") == "tool"]
         assert len(tool_result_msgs) > 0
@@ -1821,12 +1864,14 @@ class TestExecuteStreamLive:
         turn2 = _mock_ollama_response(content="Found it.")
 
         ollama.chat = AsyncMock(side_effect=[turn1, turn2])
-        security.execute_tool = AsyncMock(return_value=ExecutionResult(
-            content="[TOOL RESULT — EXTERNAL DATA]\nData",
-            server="test-server",
-            tool_name="recall",
-            duration_ms=5.0,
-        ))
+        security.execute_tool = AsyncMock(
+            return_value=ExecutionResult(
+                content="[TOOL RESULT — EXTERNAL DATA]\nData",
+                server="test-server",
+                tool_name="recall",
+                duration_ms=5.0,
+            )
+        )
 
         events = []
         async for event in loop.execute_stream("Search", model="test-model"):
@@ -1892,9 +1937,7 @@ class TestExecuteStreamLive:
         """Simple text response still yields text + done via streaming."""
         loop, ollama, security = loop_setup
 
-        ollama.chat = AsyncMock(return_value=_mock_ollama_response(
-            content="Just text."
-        ))
+        ollama.chat = AsyncMock(return_value=_mock_ollama_response(content="Just text."))
 
         events = []
         async for event in loop.execute_stream("Hello", model="test-model"):
@@ -1923,9 +1966,11 @@ class TestSemanticDefenseIntegration:
 
         config = _make_config()
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema(n) for n in tool_names],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema(n) for n in tool_names],
+            }
+        )
         mcp.call_tool = AsyncMock(return_value="clean result: hello")
 
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
@@ -1990,10 +2035,7 @@ class TestSemanticDefenseIntegration:
         assert result.risk_assessment.attempts_instruction_override is True
         assert result.risk_assessment.attempts_exfiltration is True
         # Provenance should amplify since tool_result is third_party
-        assert any(
-            "provenance_amplified" in s
-            for s in result.risk_assessment.raw_signals
-        )
+        assert any("provenance_amplified" in s for s in result.risk_assessment.raw_signals)
 
     @pytest.mark.asyncio
     async def test_clean_result_zero_risk(self, gateway_setup):
@@ -2001,9 +2043,7 @@ class TestSemanticDefenseIntegration:
         gateway, mcp = gateway_setup
         await gateway.connect_and_scan()
 
-        mcp.call_tool = AsyncMock(
-            return_value='{"memories": [{"key": "test", "value": "hello"}]}'
-        )
+        mcp.call_tool = AsyncMock(return_value='{"memories": [{"key": "test", "value": "hello"}]}')
 
         tc = OllamaToolCall(
             function_name="test-server__echo",
@@ -2049,9 +2089,11 @@ class TestTaintTrackingIntegration:
             ),
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema(n) for n in tool_names],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema(n) for n in tool_names],
+            }
+        )
         mcp.call_tool = AsyncMock(return_value="clean result")
 
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
@@ -2065,9 +2107,7 @@ class TestTaintTrackingIntegration:
         await gateway.connect_and_scan()
 
         # Step 1: First tool returns content containing a URL
-        mcp.call_tool = AsyncMock(
-            return_value="Check out https://evil.com/exfil for more info"
-        )
+        mcp.call_tool = AsyncMock(return_value="Check out https://evil.com/exfil for more info")
         tc1 = OllamaToolCall(
             function_name="test-server__echo",
             arguments={"input": "search"},
@@ -2091,9 +2131,7 @@ class TestTaintTrackingIntegration:
         await gateway.connect_and_scan()
 
         # First tool returns a URL
-        mcp.call_tool = AsyncMock(
-            return_value="Found at https://evil.com/something"
-        )
+        mcp.call_tool = AsyncMock(return_value="Found at https://evil.com/something")
         tc1 = OllamaToolCall(
             function_name="test-server__echo",
             arguments={"input": "search"},
@@ -2116,9 +2154,7 @@ class TestTaintTrackingIntegration:
         await gateway.connect_and_scan()
 
         # Tool returns content with a URL
-        mcp.call_tool = AsyncMock(
-            return_value="Remember https://evil.com/payload"
-        )
+        mcp.call_tool = AsyncMock(return_value="Remember https://evil.com/payload")
         tc1 = OllamaToolCall(
             function_name="test-server__echo",
             arguments={"input": "test"},
@@ -2141,9 +2177,7 @@ class TestTaintTrackingIntegration:
         gateway, mcp, audit = gateway_setup
         await gateway.connect_and_scan()
 
-        mcp.call_tool = AsyncMock(
-            return_value="Visit https://evil.com/exfil"
-        )
+        mcp.call_tool = AsyncMock(return_value="Visit https://evil.com/exfil")
         tc1 = OllamaToolCall(
             function_name="test-server__echo",
             arguments={"input": "test"},
@@ -2160,10 +2194,7 @@ class TestTaintTrackingIntegration:
 
         # Check audit trail
         entries = audit.get_session_entries()
-        taint_events = [
-            e for e in entries
-            if e.event_type == AuditEventType.TAINTED_SINK_BLOCKED
-        ]
+        taint_events = [e for e in entries if e.event_type == AuditEventType.TAINTED_SINK_BLOCKED]
         assert len(taint_events) >= 1
         assert "test-server:echo" in taint_events[0].reason
 
@@ -2180,9 +2211,7 @@ class TestTaintTrackingIntegration:
         await gateway.connect_and_scan()
 
         # Seed taint
-        mcp.call_tool = AsyncMock(
-            return_value="data from 192.168.1.100"
-        )
+        mcp.call_tool = AsyncMock(return_value="data from 192.168.1.100")
         tc1 = OllamaToolCall(
             function_name="test-server__echo",
             arguments={"input": "test"},
@@ -2231,9 +2260,11 @@ class TestTaintTrackingIntegration:
             ),
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema(n) for n in tool_names],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema(n) for n in tool_names],
+            }
+        )
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
         gateway = SecurityGateway(mcp, config, audit, registry=registry)
 
@@ -2247,9 +2278,7 @@ class TestTaintTrackingIntegration:
         await gateway.connect_and_scan()
 
         # Seed taint with a URL
-        mcp.call_tool = AsyncMock(
-            return_value="see https://evil.com/exfil for details"
-        )
+        mcp.call_tool = AsyncMock(return_value="see https://evil.com/exfil for details")
         tc1 = OllamaToolCall(
             function_name="test-server__echo",
             arguments={"input": "search"},
@@ -2276,8 +2305,7 @@ class TestTaintTrackingIntegration:
         # Audit shows the tainted sink confirmation
         entries = audit.get_session_entries()
         taint_confirmed = [
-            e for e in entries
-            if e.event_type == AuditEventType.TAINTED_SINK_CONFIRMED
+            e for e in entries if e.event_type == AuditEventType.TAINTED_SINK_CONFIRMED
         ]
         assert len(taint_confirmed) == 1
 
@@ -2308,9 +2336,11 @@ class TestTaintTrackingIntegration:
             ),
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema(n) for n in tool_names],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema(n) for n in tool_names],
+            }
+        )
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
         gateway = SecurityGateway(mcp, config, audit, registry=registry)
         # No confirmation callback set — fail-closed
@@ -2358,17 +2388,17 @@ class TestTaintTrackingIntegration:
             ),
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema(n) for n in tool_names],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema(n) for n in tool_names],
+            }
+        )
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
         gateway = SecurityGateway(mcp, config, audit, registry=registry)
         await gateway.connect_and_scan()
 
         # Seed taint with an allowed domain
-        mcp.call_tool = AsyncMock(
-            return_value="endpoint: https://trusted-api.com/v1/data"
-        )
+        mcp.call_tool = AsyncMock(return_value="endpoint: https://trusted-api.com/v1/data")
         tc1 = OllamaToolCall(
             function_name="test-server__echo",
             arguments={"input": "discover"},
@@ -2448,9 +2478,11 @@ class TestCapabilityNarrowingIntegration:
             ),
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema(n) for n in tool_names],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema(n) for n in tool_names],
+            }
+        )
         mcp.call_tool = AsyncMock(return_value="ok")
 
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
@@ -2571,9 +2603,11 @@ class TestCapabilityNarrowingIntegration:
             ),
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema("echo")],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema("echo")],
+            }
+        )
         mcp.call_tool = AsyncMock(return_value="ok")
 
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
@@ -2752,9 +2786,11 @@ class TestAuditCompleteness:
             ),
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema(n) for n in tool_names],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema(n) for n in tool_names],
+            }
+        )
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
         gateway = SecurityGateway(mcp, config, audit, registry=registry)
         await gateway.connect_and_scan()
@@ -2774,10 +2810,7 @@ class TestAuditCompleteness:
             await gateway.execute_tool(tc2, model_id="test", turn=1)
 
         events = audit.get_session_entries()
-        taint_blocked = [
-            e for e in events
-            if e.event_type == AuditEventType.TAINTED_SINK_BLOCKED
-        ]
+        taint_blocked = [e for e in events if e.event_type == AuditEventType.TAINTED_SINK_BLOCKED]
         assert len(taint_blocked) >= 1
 
     @pytest.mark.asyncio
@@ -2800,8 +2833,9 @@ class TestAuditCompleteness:
             arguments={"input": "hello"},
         )
         await gateway.execute_tool(tc, model_id="test", turn=0)
-        assert last_event().event_type == AuditEventType.TOOL_CALL, \
+        assert last_event().event_type == AuditEventType.TOOL_CALL, (
             f"Success logged {last_event().event_type}, expected TOOL_CALL"
+        )
 
         # 2. Unapproved tool → TOOL_BLOCKED
         tc_bad = OllamaToolCall(
@@ -2810,8 +2844,9 @@ class TestAuditCompleteness:
         )
         with pytest.raises(ToolBlockedError):
             await gateway.execute_tool(tc_bad, model_id="test", turn=1)
-        assert last_event().event_type == AuditEventType.TOOL_BLOCKED, \
+        assert last_event().event_type == AuditEventType.TOOL_BLOCKED, (
             f"Block logged {last_event().event_type}, expected TOOL_BLOCKED"
+        )
 
         # 3. Param rejection → TOOL_BLOCKED
         tc_param = OllamaToolCall(
@@ -2820,8 +2855,9 @@ class TestAuditCompleteness:
         )
         with pytest.raises(ParameterRejectedError):
             await gateway.execute_tool(tc_param, model_id="test", turn=2)
-        assert last_event().event_type == AuditEventType.TOOL_BLOCKED, \
+        assert last_event().event_type == AuditEventType.TOOL_BLOCKED, (
             f"Param rejection logged {last_event().event_type}, expected TOOL_BLOCKED"
+        )
 
         # 4. MCP error → TOOL_ERROR
         mcp.call_tool = AsyncMock(side_effect=RuntimeError("boom"))
@@ -2831,8 +2867,9 @@ class TestAuditCompleteness:
         )
         with pytest.raises(MCPToolError):
             await gateway.execute_tool(tc_err, model_id="test", turn=3)
-        assert last_event().event_type == AuditEventType.TOOL_ERROR, \
+        assert last_event().event_type == AuditEventType.TOOL_ERROR, (
             f"MCP error logged {last_event().event_type}, expected TOOL_ERROR"
+        )
 
 
 # --- Capability Manifest Integration (PR 10) ---
@@ -2877,9 +2914,11 @@ class TestCapabilityManifestIntegration:
             },
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema("echo")],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema("echo")],
+            }
+        )
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
         gateway = SecurityGateway(mcp, config, audit, registry=registry)
         await gateway.connect_and_scan()
@@ -2913,9 +2952,11 @@ class TestCapabilityManifestIntegration:
             ),
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema("send_email")],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema("send_email")],
+            }
+        )
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
         gateway = SecurityGateway(mcp, config, audit, registry=registry)
         await gateway.connect_and_scan()
@@ -2958,9 +2999,11 @@ class TestCapabilityManifestIntegration:
             },
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema(n) for n in tool_names],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema(n) for n in tool_names],
+            }
+        )
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
         gateway = SecurityGateway(mcp, config, audit, registry=registry)
         await gateway.connect_and_scan()
@@ -3013,9 +3056,11 @@ class TestCapabilityManifestIntegration:
             },
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema("write_file")],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema("write_file")],
+            }
+        )
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
         gateway = SecurityGateway(mcp, config, audit, registry=registry)
         await gateway.connect_and_scan()
@@ -3049,9 +3094,11 @@ class TestCapabilityManifestIntegration:
             ),
         )
         mcp = MagicMock(spec=MCPClientManager)
-        mcp.list_all_tools = AsyncMock(return_value={
-            "test-server": [_make_tool_schema("get_status")],
-        })
+        mcp.list_all_tools = AsyncMock(
+            return_value={
+                "test-server": [_make_tool_schema("get_status")],
+            }
+        )
         mcp.call_tool = AsyncMock(return_value="status: ok")
         audit = AuditLogger(str(tmp_path / "audit.jsonl"))
         gateway = SecurityGateway(mcp, config, audit, registry=registry)

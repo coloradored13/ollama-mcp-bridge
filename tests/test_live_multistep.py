@@ -45,9 +45,7 @@ class TestMultiToolUse:
             f"add not called. Tools called: {tool_names_called}. "
             f"Full result: {result.content[:200]}"
         )
-        assert "15" in result.content, (
-            f"Expected '15' in response. Got: {result.content[:300]}"
-        )
+        assert "15" in result.content, f"Expected '15' in response. Got: {result.content[:300]}"
 
     @pytest.mark.asyncio
     async def test_multiple_add_calls(self, live_bridge, ollama_model):
@@ -131,8 +129,7 @@ class TestResultChaining:
         second_call_args = add_calls[1].arguments
         arg_values = [second_call_args.get("a", 0), second_call_args.get("b", 0)]
         assert 100 in arg_values or 100.0 in arg_values, (
-            f"Second add call should use 100 from first result. "
-            f"Got args: {second_call_args}"
+            f"Second add call should use 100 from first result. Got args: {second_call_args}"
         )
         assert "101" in result.content
 
@@ -147,8 +144,7 @@ class TestFaultTolerance:
         bridge = await live_bridge(max_turns=5)
 
         result = await bridge.run(
-            'Use the flaky_tool with input "please fail". '
-            "Report what happened.",
+            'Use the flaky_tool with input "please fail". Report what happened.',
             model=ollama_model,
             system_prompt=(
                 "Use flaky_tool when asked. If the tool returns an error, "
@@ -158,7 +154,10 @@ class TestFaultTolerance:
 
         flaky_calls = [tc for tc in result.tool_calls if tc.tool_name == "flaky_tool"]
         assert len(flaky_calls) >= 1
-        assert "ERROR" in flaky_calls[0].result_summary or "fail" in flaky_calls[0].result_summary.lower()
+        assert (
+            "ERROR" in flaky_calls[0].result_summary
+            or "fail" in flaky_calls[0].result_summary.lower()
+        )
         assert result.content != ""
         assert not result.truncated
 
@@ -182,12 +181,8 @@ class TestFaultTolerance:
 
         assert not result.truncated, "Conversation truncated — result is incomplete"
         tool_names = [tc.tool_name for tc in result.tool_calls]
-        assert "flaky_tool" in tool_names, (
-            f"flaky_tool not attempted. Calls: {tool_names}"
-        )
-        assert "add" in tool_names, (
-            f"Model didn't recover to add tool. Calls: {tool_names}"
-        )
+        assert "flaky_tool" in tool_names, f"flaky_tool not attempted. Calls: {tool_names}"
+        assert "add" in tool_names, f"Model didn't recover to add tool. Calls: {tool_names}"
         assert "10" in result.content
 
     @pytest.mark.asyncio
@@ -203,8 +198,7 @@ class TestFaultTolerance:
 
         assert not result.truncated, "Conversation truncated — result is incomplete"
         flaky_calls = [
-            tc for tc in result.tool_calls
-            if tc.tool_name == "flaky_tool" and not tc.blocked
+            tc for tc in result.tool_calls if tc.tool_name == "flaky_tool" and not tc.blocked
         ]
         assert len(flaky_calls) >= 1
         assert "succeeded" in flaky_calls[0].result_summary.lower()

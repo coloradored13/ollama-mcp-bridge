@@ -91,9 +91,7 @@ class TestModelToolExecution:
 
         assert not result.truncated, "Conversation truncated — result is incomplete"
         assert len(result.tool_calls) >= 1
-        tool_call_entries = [
-            e for e in result.audit_log if e.event_type.value == "tool_call"
-        ]
+        tool_call_entries = [e for e in result.audit_log if e.event_type.value == "tool_call"]
         assert len(tool_call_entries) >= 1
 
 
@@ -104,11 +102,13 @@ class TestModelSecurityPipeline:
     @pytest.mark.asyncio
     async def test_unapproved_tool_not_callable(self, live_bridge, ollama_model):
         """Model cannot call tools that are pending approval."""
+
         async def approve_echo_only(pending):
             return {p.key: (p.name == "echo") for p in pending}
 
         bridge = await live_bridge(
-            auto_approve=False, require_approval=True,
+            auto_approve=False,
+            require_approval=True,
             approval_callback=approve_echo_only,
         )
 
@@ -152,6 +152,4 @@ class TestModelSecurityPipeline:
 
         assert not result.truncated, "Conversation truncated — result is incomplete"
         if result.tool_calls:
-            assert result.turns >= 2, (
-                f"With tool calls, expected >= 2 turns, got {result.turns}"
-            )
+            assert result.turns >= 2, f"With tool calls, expected >= 2 turns, got {result.turns}"

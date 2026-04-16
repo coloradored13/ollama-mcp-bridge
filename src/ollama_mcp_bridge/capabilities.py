@@ -23,7 +23,6 @@ from typing import Any
 
 from .types import CapabilitySource, ToolCapabilityManifest, ToolSchema
 
-
 # --- Compiled pattern sets (module-level for performance) ---
 # Word boundary strategy: (?:^|(?<=_)|\b) for leading edge, (?=_|$|\b) for trailing.
 # This handles both underscore-separated tool names (store_memory) and space-separated
@@ -168,9 +167,8 @@ def infer_capabilities(tool: ToolSchema) -> ToolCapabilityManifest:
 
     # --- Evaluate each capability dimension ---
 
-    network = (
-        bool(_NETWORK_PATTERNS.search(text))
-        or _any_field_matches(schema_fields, _NETWORK_SCHEMA_FIELDS)
+    network = bool(_NETWORK_PATTERNS.search(text)) or _any_field_matches(
+        schema_fields, _NETWORK_SCHEMA_FIELDS
     )
 
     outbound = network  # conservative: any network access implies potential outbound
@@ -187,9 +185,8 @@ def infer_capabilities(tool: ToolSchema) -> ToolCapabilityManifest:
 
     code_exec = bool(_CODE_EXECUTION_PATTERNS.search(text))
 
-    credential = (
-        bool(_CREDENTIAL_PATTERNS.search(text))
-        or _any_field_matches(schema_fields, _CREDENTIAL_SCHEMA_FIELDS)
+    credential = bool(_CREDENTIAL_PATTERNS.search(text)) or _any_field_matches(
+        schema_fields, _CREDENTIAL_SCHEMA_FIELDS
     )
 
     identity = bool(_USER_IDENTITY_PATTERNS.search(text))
@@ -274,10 +271,21 @@ def _check_memory_write(name_lower: str, desc_lower: str, text: str) -> bool:
 
     # Direct name match for common memory tools
     memory_tool_names = {
-        "store_memory", "save_memory", "write_memory", "create_memory",
-        "remember", "memorize", "persist_memory", "log_memory",
-        "store_note", "save_note", "create_note", "add_note",
-        "update_knowledge", "store_knowledge", "save_knowledge",
+        "store_memory",
+        "save_memory",
+        "write_memory",
+        "create_memory",
+        "remember",
+        "memorize",
+        "persist_memory",
+        "log_memory",
+        "store_note",
+        "save_note",
+        "create_note",
+        "add_note",
+        "update_knowledge",
+        "store_knowledge",
+        "save_knowledge",
     }
     if name_lower in memory_tool_names:
         return True

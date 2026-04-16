@@ -78,9 +78,7 @@ class OllamaClient:
             raise OllamaResponseError(f"Ollama API error: {e}") from e
         except Exception as e:
             if "connect" in str(e).lower() or "refused" in str(e).lower():
-                raise OllamaConnectionError(
-                    f"Cannot reach Ollama at {self._host}: {e}"
-                ) from e
+                raise OllamaConnectionError(f"Cannot reach Ollama at {self._host}: {e}") from e
             raise OllamaResponseError(f"Unexpected Ollama error: {e}") from e
 
     async def chat_stream(
@@ -106,9 +104,7 @@ class OllamaClient:
             raise OllamaResponseError(f"Ollama streaming error: {e}") from e
         except Exception as e:
             if "connect" in str(e).lower() or "refused" in str(e).lower():
-                raise OllamaConnectionError(
-                    f"Cannot reach Ollama at {self._host}: {e}"
-                ) from e
+                raise OllamaConnectionError(f"Cannot reach Ollama at {self._host}: {e}") from e
             raise OllamaResponseError(f"Unexpected Ollama streaming error: {e}") from e
 
     async def check_health(self) -> bool:

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from ollama_mcp_bridge.audit import AuditLogger, _summarize_params
 from ollama_mcp_bridge.types import ActionClass, AuditEventType
 
@@ -134,11 +132,17 @@ class TestAuditSessionRetention:
         )
 
         audit.log_tool_call(
-            server="s1", tool="t1", action_class=ActionClass.READ, params={"a": "1"},
+            server="s1",
+            tool="t1",
+            action_class=ActionClass.READ,
+            params={"a": "1"},
         )
         audit.flush()
         audit.log_tool_call(
-            server="s2", tool="t2", action_class=ActionClass.WRITE, params={"b": "2"},
+            server="s2",
+            tool="t2",
+            action_class=ActionClass.WRITE,
+            params={"b": "2"},
         )
 
         entries = audit.get_session_entries()
@@ -156,7 +160,10 @@ class TestAuditSessionRetention:
 
         for i in range(5):
             audit.log_tool_call(
-                server="s", tool=f"t{i}", action_class=ActionClass.READ, params={},
+                server="s",
+                tool=f"t{i}",
+                action_class=ActionClass.READ,
+                params={},
             )
 
         entries = audit.get_session_entries()
@@ -171,7 +178,10 @@ class TestAuditSessionRetention:
         )
 
         audit.log_tool_call(
-            server="s", tool="t", action_class=ActionClass.READ, params={"x": "y"},
+            server="s",
+            tool="t",
+            action_class=ActionClass.READ,
+            params={"x": "y"},
         )
         audit.close()
 
@@ -259,7 +269,7 @@ class TestAuditFsync:
 
     def test_flush_calls_fsync(self, tmp_path):
         """flush() invokes os.fsync on the file descriptor."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         audit = AuditLogger(
             audit_file=str(tmp_path / "audit.jsonl"),
@@ -302,6 +312,7 @@ class TestAuditFsync:
             audit.log_event(AuditEventType.TOOL_BLOCKED, server="s", tool="t")
 
         assert len(fsync_calls) >= 1, "Critical event must trigger fsync"
-        # Verify event was written to disk (AuditEventType.TOOL_BLOCKED serializes as "tool_blocked")
+        # Verify event was written to disk
+        # (AuditEventType.TOOL_BLOCKED serializes as "tool_blocked")
         content = (tmp_path / "audit.jsonl").read_text()
         assert "tool_blocked" in content

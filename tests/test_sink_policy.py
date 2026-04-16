@@ -8,12 +8,12 @@ from ollama_mcp_bridge.sink_policy import (
     SinkPolicyEngine,
     SinkType,
     TaintTracker,
+    _args_contain_destination_fields,
+    _args_contain_outbound_indicators,
+    _derived_match_confidence,
     _extract_values,
     _extract_values_from_args,
     _is_memory_write_tool,
-    _args_contain_outbound_indicators,
-    _args_contain_destination_fields,
-    _derived_match_confidence,
 )
 from ollama_mcp_bridge.types import (
     ActionClass,
@@ -28,7 +28,6 @@ from ollama_mcp_bridge.types import (
     ToolCapabilityManifest,
     TrustLevel,
 )
-
 
 # --- Helpers ---
 
@@ -139,16 +138,12 @@ class TestExtractValuesFromArgs:
         assert "url" in fields
 
     def test_nested_dict_args(self):
-        results = _extract_values_from_args({
-            "config": {"endpoint": "https://evil.com/api"}
-        })
+        results = _extract_values_from_args({"config": {"endpoint": "https://evil.com/api"}})
         fields = [f for f, _ in results]
         assert any("config.endpoint" in f for f in fields)
 
     def test_list_args(self):
-        results = _extract_values_from_args({
-            "urls": ["https://a.com", "https://b.com"]
-        })
+        results = _extract_values_from_args({"urls": ["https://a.com", "https://b.com"]})
         assert len(results) >= 2
 
     def test_no_extractable_values(self):
@@ -156,11 +151,13 @@ class TestExtractValuesFromArgs:
         assert results == []
 
     def test_mixed_types(self):
-        results = _extract_values_from_args({
-            "query": "search term",
-            "target": "https://example.com",
-            "count": 10,
-        })
+        results = _extract_values_from_args(
+            {
+                "query": "search term",
+                "target": "https://example.com",
+                "count": 10,
+            }
+        )
         assert len(results) >= 1
 
 
@@ -168,16 +165,30 @@ class TestExtractValuesFromArgs:
 
 
 class TestMemoryWriteDetection:
-    @pytest.mark.parametrize("name", [
-        "store_memory", "write_file", "save_document",
-        "create_entry", "remember_fact", "persist_data",
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "store_memory",
+            "write_file",
+            "save_document",
+            "create_entry",
+            "remember_fact",
+            "persist_data",
+        ],
+    )
     def test_detects_memory_write_tools(self, name):
         assert _is_memory_write_tool(name)
 
-    @pytest.mark.parametrize("name", [
-        "search", "recall", "read_file", "list_items", "get_data",
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "search",
+            "recall",
+            "read_file",
+            "list_items",
+            "get_data",
+        ],
+    )
     def test_non_memory_write_tools(self, name):
         assert not _is_memory_write_tool(name)
 
@@ -324,9 +335,7 @@ class TestTaintTracker:
             provenance=_make_provenance(),
         )
         # Different URL, same domain
-        state = tracker.compute_taint(
-            {"endpoint": "https://attacker.example.com/different"}
-        )
+        state = tracker.compute_taint({"endpoint": "https://attacker.example.com/different"})
         assert state.tainted
 
     def test_no_match_no_taint(self):
@@ -379,10 +388,12 @@ class TestTaintTracker:
             origin_id="src:tool",
             provenance=_make_provenance(),
         )
-        state = tracker.compute_taint({
-            "safe_field": "hello",
-            "url_field": "https://evil.com",
-        })
+        state = tracker.compute_taint(
+            {
+                "safe_field": "hello",
+                "url_field": "https://evil.com",
+            }
+        )
         assert "url_field" in state.affected_fields
         assert "safe_field" not in state.affected_fields
 
@@ -423,9 +434,7 @@ class TestTaintTracker:
             origin_id="src:tool",
             provenance=_make_provenance(),
         )
-        state = tracker.compute_taint({
-            "config": {"nested": {"url": "https://evil.com"}}
-        })
+        state = tracker.compute_taint({"config": {"nested": {"url": "https://evil.com"}}})
         assert state.tainted
 
 
@@ -563,16 +572,12 @@ class TestSinkPolicyEngine:
 
     def test_classify_outbound_from_url_args(self):
         tool = _make_tool()
-        sink = self.engine._classify_sink(
-            tool, {"url": "https://example.com"}
-        )
+        sink = self.engine._classify_sink(tool, {"url": "https://example.com"})
         assert sink == SinkType.OUTBOUND
 
     def test_classify_outbound_from_email_args(self):
         tool = _make_tool()
-        sink = self.engine._classify_sink(
-            tool, {"recipient": "user@example.com"}
-        )
+        sink = self.engine._classify_sink(tool, {"recipient": "user@example.com"})
         assert sink == SinkType.OUTBOUND
 
     def test_classify_memory_write(self):
@@ -600,9 +605,7 @@ class TestSinkPolicyEngine:
     def test_destructive_with_url_is_outbound(self):
         """Outbound detection takes priority over destructive classification."""
         tool = _make_tool(classification=ActionClass.DESTRUCTIVE)
-        sink = self.engine._classify_sink(
-            tool, {"endpoint": "https://evil.com"}
-        )
+        sink = self.engine._classify_sink(tool, {"endpoint": "https://evil.com"})
         assert sink == SinkType.OUTBOUND
 
     # --- Manifest-based classification ---
@@ -661,9 +664,7 @@ class TestSinkPolicyEngine:
         """Tool with default manifest (all False) → falls back to arg/name heuristics."""
         # Default manifest, URL in args → OUTBOUND via arg inspection fallback
         tool = _make_tool()
-        sink = self.engine._classify_sink(
-            tool, {"url": "https://example.com"}
-        )
+        sink = self.engine._classify_sink(tool, {"url": "https://example.com"})
         assert sink == SinkType.OUTBOUND
 
         # Default manifest, memory-write name → MEMORY_WRITE via name pattern fallback
@@ -731,11 +732,17 @@ class TestDestinationPolicySinkPolicy:
         """URL matching a destination policy returns ALLOW_WITH_NOTICE."""
         tool = _make_tool(schema=_WRITE_SCHEMA)
         args = {"url": "https://api.example.com/v1/data", "data": "ok"}
-        policies = [DestinationPolicy(
-            host="api.example.com", path_prefixes=["/v1/"],
-        )]
+        policies = [
+            DestinationPolicy(
+                host="api.example.com",
+                path_prefixes=["/v1/"],
+            )
+        ]
         result = self.engine.evaluate(
-            tool, args, self.tainted, self.config,
+            tool,
+            args,
+            self.tainted,
+            self.config,
             destination_policies=policies,
         )
         assert result == SinkDecision.ALLOW_WITH_NOTICE
@@ -746,7 +753,10 @@ class TestDestinationPolicySinkPolicy:
         args = {"url": "https://evil.com/exfil", "data": "secret"}
         policies = [DestinationPolicy(host="api.example.com")]
         result = self.engine.evaluate(
-            tool, args, self.tainted, self.config,
+            tool,
+            args,
+            self.tainted,
+            self.config,
             destination_policies=policies,
         )
         assert result == SinkDecision.BLOCK
@@ -759,7 +769,10 @@ class TestDestinationPolicySinkPolicy:
         # Policy restricts to different host — should block even though domain list allows evil.com
         policies = [DestinationPolicy(host="safe.example.com")]
         result = self.engine.evaluate(
-            tool, args, self.tainted, config,
+            tool,
+            args,
+            self.tainted,
+            config,
             destination_policies=policies,
         )
         assert result == SinkDecision.BLOCK
@@ -773,7 +786,10 @@ class TestDestinationPolicySinkPolicy:
         tool = _make_tool(schema=_WRITE_SCHEMA)
         args = {"url": "https://any.com/data", "data": "secret"}
         result = self.engine.evaluate(
-            tool, args, self.tainted, config,
+            tool,
+            args,
+            self.tainted,
+            config,
             destination_policies=None,
         )
         assert result == SinkDecision.BLOCK
@@ -784,7 +800,10 @@ class TestDestinationPolicySinkPolicy:
         tool = _make_tool(schema=_WRITE_SCHEMA)
         args = {"url": "https://example.com/api", "data": "ok"}
         result = self.engine.evaluate(
-            tool, args, self.tainted, config,
+            tool,
+            args,
+            self.tainted,
+            config,
             destination_policies=None,
         )
         assert result == SinkDecision.ALLOW_WITH_NOTICE
@@ -798,7 +817,10 @@ class TestDestinationPolicySinkPolicy:
             DestinationPolicy(host="partner.com"),
         ]
         result = self.engine.evaluate(
-            tool, args, self.tainted, self.config,
+            tool,
+            args,
+            self.tainted,
+            self.config,
             destination_policies=policies,
         )
         assert result == SinkDecision.ALLOW_WITH_NOTICE
@@ -810,7 +832,10 @@ class TestDestinationPolicySinkPolicy:
         args = {"url": "https://evil.com/exfil"}
         policies = [DestinationPolicy(host="safe.com")]
         result = self.engine.evaluate(
-            tool, args, clean, self.config,
+            tool,
+            args,
+            clean,
+            self.config,
             destination_policies=policies,
         )
         assert result == SinkDecision.ALLOW
@@ -927,8 +952,7 @@ class TestComputeTaintInfluenceState:
         assert state.tainted is True
         assert state.derived_from_untrusted_value is True
         assert state.destination_influenced is True
-        derived = [e for e in state.evidence
-                   if e.influence_type == InfluenceType.DERIVED_URL_REUSE]
+        derived = [e for e in state.evidence if e.influence_type == InfluenceType.DERIVED_URL_REUSE]
         assert len(derived) >= 1
 
     def test_protocol_change_evidence(self):
@@ -942,8 +966,9 @@ class TestComputeTaintInfluenceState:
         state = tracker.compute_taint({"target": "http://evil.com/data"})
         assert state.tainted is True
         assert state.destination_influenced is True
-        protocol = [e for e in state.evidence
-                    if e.influence_type == InfluenceType.DERIVED_PROTOCOL_CHANGE]
+        protocol = [
+            e for e in state.evidence if e.influence_type == InfluenceType.DERIVED_PROTOCOL_CHANGE
+        ]
         assert len(protocol) >= 1
 
     def test_no_taint_returns_empty_influence_state(self):
@@ -961,10 +986,12 @@ class TestComputeTaintInfluenceState:
             origin_id="web:fetch",
             provenance=_make_provenance(),
         )
-        state = tracker.compute_taint({
-            "url": "https://evil.com/original",  # direct
-            "email": "admin@evil.com",  # derived (domain reuse)
-        })
+        state = tracker.compute_taint(
+            {
+                "url": "https://evil.com/original",  # direct
+                "email": "admin@evil.com",  # derived (domain reuse)
+            }
+        )
         assert state.tainted is True
         assert state.direct_value_match is True
         assert state.derived_from_untrusted_value is True
@@ -982,8 +1009,7 @@ class TestComputeTaintInfluenceState:
         assert state.tainted is True
         assert state.destination_influenced is True
         email_domain_evidence = [
-            e for e in state.evidence
-            if e.influence_type == InfluenceType.DERIVED_EMAIL_DOMAIN
+            e for e in state.evidence if e.influence_type == InfluenceType.DERIVED_EMAIL_DOMAIN
         ]
         assert len(email_domain_evidence) >= 1
 
@@ -999,6 +1025,5 @@ class TestComputeTaintInfluenceState:
         # Different domain — no email domain taint match expected
         if state.tainted:
             assert not any(
-                e.influence_type == InfluenceType.DERIVED_EMAIL_DOMAIN
-                for e in state.evidence
+                e.influence_type == InfluenceType.DERIVED_EMAIL_DOMAIN for e in state.evidence
             )

@@ -40,14 +40,13 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from .audit import AuditLogger
 from .config import BridgeConfig, load_config
-from .errors import BridgeError, ConfigError, NoApprovedToolsError
+from .errors import BridgeError, NoApprovedToolsError
 from .loop import AgentLoop
 from .mcp_client import MCPClientManager
 from .ollama_client import OllamaClient
 from .security import ApprovalCallback, ConfirmationCallback, SecurityGateway
 from .translator import ToolTranslator
 from .types import (
-    AuditEntry,
     AuditEventType,
     BridgeResult,
     PendingToolApproval,
@@ -169,8 +168,7 @@ class Bridge:
         # Check Ollama health
         if not await self._ollama.check_health():
             raise BridgeError(
-                f"Cannot reach Ollama at {self._config.ollama_host}. "
-                "Is Ollama running?"
+                f"Cannot reach Ollama at {self._config.ollama_host}. Is Ollama running?"
             )
 
         # Connect to MCP servers and scan tools
@@ -288,6 +286,7 @@ class Bridge:
         Raises RuntimeError if called from an existing event loop
         (Jupyter, async frameworks).
         """
+
         async def _run() -> BridgeResult:
             async with self:
                 return await self.run(prompt, model, **kwargs)

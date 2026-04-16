@@ -20,11 +20,10 @@ import ipaddress
 import json
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal
-from urllib.parse import urlparse, unquote
+from typing import Any
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 
 # --- Transport types ---
 
@@ -159,18 +158,25 @@ class RegistryEntry(BaseModel):
     notes: str | None = None
     last_seen_at: datetime | None = None
     denied_hashes: list[str] = Field(default_factory=list)
-    capabilities: dict[str, Any] = Field(default_factory=dict)  # capability manifest snapshot at approval
+    capabilities: dict[str, Any] = Field(
+        default_factory=dict
+    )  # capability manifest snapshot at approval
 
 
 class ToolState(str, Enum):
     """State of a tool in the first-run approval pipeline.
 
     Lifecycle:
-      DISCOVERED → ALLOWLISTED → [sanitize] → PENDING_FIRST_APPROVAL → APPROVED / DENIED_BY_USER
-      DISCOVERED → ALLOWLISTED → [sanitize] → BLOCKED_SANITIZATION  (terminal — pattern detection)
-      DISCOVERED → ALLOWLISTED → [sanitize] → pass → [profile] → BLOCKED_PROFILE  (terminal — capability enforcement)
-      DISCOVERED → ALLOWLISTED → [integrity] → BLOCKED_INTEGRITY    (terminal)
-      DISCOVERED → ALLOWLISTED → [hash match] → APPROVED            (auto, skip pending)
+      DISCOVERED → ALLOWLISTED → [sanitize] → PENDING_FIRST_APPROVAL
+          → APPROVED / DENIED_BY_USER
+      DISCOVERED → ALLOWLISTED → [sanitize] → BLOCKED_SANITIZATION
+          (terminal — pattern detection)
+      DISCOVERED → ALLOWLISTED → [sanitize] → pass → [profile] → BLOCKED_PROFILE
+          (terminal — capability enforcement)
+      DISCOVERED → ALLOWLISTED → [integrity] → BLOCKED_INTEGRITY
+          (terminal)
+      DISCOVERED → ALLOWLISTED → [hash match] → APPROVED
+          (auto, skip pending)
     """
 
     DISCOVERED = "DISCOVERED"
@@ -236,16 +242,18 @@ class ToolCapabilityManifest(BaseModel):
     @property
     def is_dangerous(self) -> bool:
         """True if any high-risk capability flag is set."""
-        return any([
-            self.outbound_data_transfer,
-            self.filesystem_delete,
-            self.external_messaging,
-            self.code_execution,
-            self.credential_access,
-            self.user_identity_impact,
-            self.destructive,
-            self.high_consequence,
-        ])
+        return any(
+            [
+                self.outbound_data_transfer,
+                self.filesystem_delete,
+                self.external_messaging,
+                self.code_execution,
+                self.credential_access,
+                self.user_identity_impact,
+                self.destructive,
+                self.high_consequence,
+            ]
+        )
 
     @property
     def has_outbound_capability(self) -> bool:
@@ -260,10 +268,7 @@ class ToolCapabilityManifest(BaseModel):
     def to_audit_dict(self) -> dict[str, Any]:
         """Compact representation for audit log entries."""
         # Only include True flags to keep audit entries concise
-        flags = {
-            k: v for k, v in self.model_dump().items()
-            if v is True and k != "source"
-        }
+        flags = {k: v for k, v in self.model_dump().items() if v is True and k != "source"}
         flags["source"] = self.source.value
         return flags
 
@@ -292,7 +297,9 @@ class PathPolicy(BaseModel):
     extensions_allowlist: list[str] = Field(default_factory=list)  # empty = any extension
     filename_pattern_allowlist: list[str] = Field(default_factory=list)  # empty = any filename
 
-    def validate_path(self, raw_path: str, tool_capabilities: "ToolCapabilityManifest | None" = None) -> "PathMatchResult":
+    def validate_path(
+        self, raw_path: str, tool_capabilities: "ToolCapabilityManifest | None" = None
+    ) -> "PathMatchResult":
         """Check whether a path satisfies all constraints in this policy.
 
         Validates: relative path control, root containment, symlink escape,
@@ -301,7 +308,7 @@ class PathPolicy(BaseModel):
         import os
         import re
 
-        base = PathMatchResult(policy_roots=self.allowed_roots, checked_path=raw_path[:200])
+        PathMatchResult(policy_roots=self.allowed_roots, checked_path=raw_path[:200])
 
         # 1. Relative path check
         is_relative = not raw_path.startswith(("/", "~"))
@@ -357,16 +364,14 @@ class PathPolicy(BaseModel):
         normalized_roots = [_normalize_root(r) for r in self.allowed_roots]
 
         in_root = any(
-            resolved == root or resolved.startswith(root + os.sep)
-            for root in normalized_roots
+            resolved == root or resolved.startswith(root + os.sep) for root in normalized_roots
         )
         if not in_root:
             return PathMatchResult(
                 policy_roots=self.allowed_roots,
                 checked_path=raw_path[:200],
                 failure_reason=(
-                    f"path '{resolved}' is outside allowed roots "
-                    f"({', '.join(self.allowed_roots)})"
+                    f"path '{resolved}' is outside allowed roots ({', '.join(self.allowed_roots)})"
                 ),
             )
 
@@ -374,7 +379,10 @@ class PathPolicy(BaseModel):
         if self.extensions_allowlist:
             _, ext = os.path.splitext(resolved)
             ext_lower = ext.lower()
-            allowed_exts = {e.lower() if e.startswith(".") else f".{e.lower()}" for e in self.extensions_allowlist}
+            allowed_exts = {
+                e.lower() if e.startswith(".") else f".{e.lower()}"
+                for e in self.extensions_allowlist
+            }
             if ext_lower not in allowed_exts:
                 return PathMatchResult(
                     policy_roots=self.allowed_roots,
@@ -400,7 +408,9 @@ class PathPolicy(BaseModel):
 
         # 8. Read/write/delete capability checks
         if tool_capabilities:
-            if self.read_only and (tool_capabilities.filesystem_write or tool_capabilities.filesystem_delete):
+            if self.read_only and (
+                tool_capabilities.filesystem_write or tool_capabilities.filesystem_delete
+            ):
                 return PathMatchResult(
                     policy_roots=self.allowed_roots,
                     checked_path=raw_path[:200],
@@ -416,7 +426,9 @@ class PathPolicy(BaseModel):
                 return PathMatchResult(
                     policy_roots=self.allowed_roots,
                     checked_path=raw_path[:200],
-                    failure_reason="delete not allowed by path policy but tool has delete capability",
+                    failure_reason=(
+                        "delete not allowed by path policy but tool has delete capability"
+                    ),
                 )
 
         return PathMatchResult(
@@ -472,7 +484,7 @@ class RecipientPolicy(BaseModel):
         Case-insensitive comparison throughout.
         """
         email_lower = email.lower().strip()
-        base = RecipientMatchResult(checked_recipient=email[:200])
+        RecipientMatchResult(checked_recipient=email[:200])
 
         # 1. Exact address match
         if any(addr.lower() == email_lower for addr in self.approved_addresses):
@@ -515,11 +527,7 @@ class RecipientPolicy(BaseModel):
     @property
     def has_any_policy(self) -> bool:
         """True if any approval rule is configured."""
-        return bool(
-            self.approved_addresses
-            or self.approved_domains
-            or self.identity_groups
-        )
+        return bool(self.approved_addresses or self.approved_domains or self.identity_groups)
 
 
 class RecipientMatchResult(BaseModel):
@@ -623,12 +631,16 @@ class DestinationPolicy(BaseModel):
     host: str  # required — the target hostname
     port: int | None = None  # None = any port allowed for the scheme
     path_prefixes: list[str] = Field(default_factory=list)  # empty = any path
-    query_constraints: dict[str, str] = Field(default_factory=dict)  # NOT_YET_ENFORCED — raises if non-empty
+    query_constraints: dict[str, str] = Field(
+        default_factory=dict
+    )  # NOT_YET_ENFORCED — raises if non-empty
     allow_subdomains: bool = False
     allow_ip_literals: bool = False
     allow_private_ranges: bool = False
     allow_redirects: bool = False  # NOT_YET_ENFORCED — raises if True
-    allowed_methods: list[str] = Field(default_factory=list)  # NOT_YET_ENFORCED — raises if non-empty
+    allowed_methods: list[str] = Field(
+        default_factory=list
+    )  # NOT_YET_ENFORCED — raises if non-empty
     max_payload_bytes: int = 65536  # NOT_YET_ENFORCED — raises if not default
 
     @field_validator("query_constraints", mode="after")
@@ -688,24 +700,28 @@ class DestinationPolicy(BaseModel):
             parsed = urlparse(url)
         except Exception:
             return DestinationMatchResult(
-                policy_host=self.host, checked_url=url[:200],
+                policy_host=self.host,
+                checked_url=url[:200],
                 failure_reason="malformed URL",
             )
 
         hostname = parsed.hostname
         if not hostname:
             return DestinationMatchResult(
-                policy_host=self.host, checked_url=url[:200],
+                policy_host=self.host,
+                checked_url=url[:200],
                 failure_reason="URL has no hostname",
             )
 
         # 1. Scheme
         if parsed.scheme.lower() != self.scheme.lower():
             return DestinationMatchResult(
-                **{**base.model_dump(), "failure_reason": (
-                    f"scheme '{parsed.scheme}' does not match "
-                    f"required '{self.scheme}'"
-                )},
+                **{
+                    **base.model_dump(),
+                    "failure_reason": (
+                        f"scheme '{parsed.scheme}' does not match required '{self.scheme}'"
+                    ),
+                },
             )
 
         # 2. IP literal check (before host comparison)
@@ -717,10 +733,12 @@ class DestinationPolicy(BaseModel):
 
         if is_ip and not self.allow_ip_literals:
             return DestinationMatchResult(
-                **{**base.model_dump(), "failure_reason": (
-                    f"IP literal '{hostname}' not allowed "
-                    f"(allow_ip_literals=False)"
-                )},
+                **{
+                    **base.model_dump(),
+                    "failure_reason": (
+                        f"IP literal '{hostname}' not allowed (allow_ip_literals=False)"
+                    ),
+                },
             )
 
         # 3. Private range check
@@ -728,10 +746,13 @@ class DestinationPolicy(BaseModel):
             assert addr is not None
             if addr.is_private or addr.is_loopback or addr.is_link_local:
                 return DestinationMatchResult(
-                    **{**base.model_dump(), "failure_reason": (
-                        f"private/loopback IP '{hostname}' not allowed "
-                        f"(allow_private_ranges=False)"
-                    )},
+                    **{
+                        **base.model_dump(),
+                        "failure_reason": (
+                            f"private/loopback IP '{hostname}' not allowed "
+                            f"(allow_private_ranges=False)"
+                        ),
+                    },
                 )
 
         # 4. Host match
@@ -740,17 +761,18 @@ class DestinationPolicy(BaseModel):
             policy_host_lower = self.host.lower()
             if hostname_lower == policy_host_lower:
                 pass  # exact match
-            elif self.allow_subdomains and hostname_lower.endswith(
-                f".{policy_host_lower}"
-            ):
+            elif self.allow_subdomains and hostname_lower.endswith(f".{policy_host_lower}"):
                 pass  # subdomain match
             else:
                 return DestinationMatchResult(
-                    **{**base.model_dump(), "failure_reason": (
-                        f"host '{hostname}' does not match "
-                        f"policy host '{self.host}'"
-                        f"{' (subdomains not allowed)' if not self.allow_subdomains else ''}"
-                    )},
+                    **{
+                        **base.model_dump(),
+                        "failure_reason": (
+                            f"host '{hostname}' does not match "
+                            f"policy host '{self.host}'"
+                            f"{' (subdomains not allowed)' if not self.allow_subdomains else ''}"
+                        ),
+                    },
                 )
         else:
             # IP literal that passed the allow check — still must match policy host.
@@ -759,10 +781,13 @@ class DestinationPolicy(BaseModel):
             assert addr is not None
             if str(addr) != self.host and hostname != self.host:
                 return DestinationMatchResult(
-                    **{**base.model_dump(), "failure_reason": (
-                        f"IP '{hostname}' (normalized: {addr}) does not match "
-                        f"policy host '{self.host}'"
-                    )},
+                    **{
+                        **base.model_dump(),
+                        "failure_reason": (
+                            f"IP '{hostname}' (normalized: {addr}) does not match "
+                            f"policy host '{self.host}'"
+                        ),
+                    },
                 )
 
         # 5. Port
@@ -773,9 +798,12 @@ class DestinationPolicy(BaseModel):
                 url_port = 443 if self.scheme.lower() == "https" else 80
             if url_port != self.port:
                 return DestinationMatchResult(
-                    **{**base.model_dump(), "failure_reason": (
-                        f"port {url_port} does not match required port {self.port}"
-                    )},
+                    **{
+                        **base.model_dump(),
+                        "failure_reason": (
+                            f"port {url_port} does not match required port {self.port}"
+                        ),
+                    },
                 )
 
         # 6. Path prefixes
@@ -783,14 +811,19 @@ class DestinationPolicy(BaseModel):
             path = parsed.path or "/"
             if not any(path.startswith(prefix) for prefix in self.path_prefixes):
                 return DestinationMatchResult(
-                    **{**base.model_dump(), "failure_reason": (
-                        f"path '{path}' does not match any allowed prefix "
-                        f"({', '.join(self.path_prefixes)})"
-                    )},
+                    **{
+                        **base.model_dump(),
+                        "failure_reason": (
+                            f"path '{path}' does not match any allowed prefix "
+                            f"({', '.join(self.path_prefixes)})"
+                        ),
+                    },
                 )
 
         return DestinationMatchResult(
-            matched=True, policy_host=self.host, checked_url=url[:200],
+            matched=True,
+            policy_host=self.host,
+            checked_url=url[:200],
         )
 
 

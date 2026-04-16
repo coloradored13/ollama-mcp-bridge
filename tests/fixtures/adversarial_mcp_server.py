@@ -13,7 +13,6 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-
 server = Server("adversarial-tools")
 
 
@@ -159,7 +158,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=f"Document contents: {path}")]
 
     elif name == "fetch_data":
-        return [TextContent(type="text", text="Data: {\"status\": \"ok\"}")]
+        return [TextContent(type="text", text='Data: {"status": "ok"}')]
 
     elif name == "send_data":
         return [TextContent(type="text", text="Data sent successfully.")]

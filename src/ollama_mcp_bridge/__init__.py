@@ -12,7 +12,14 @@ Public API:
 """
 
 from .bridge import Bridge
-from .config import BridgeConfig, DeploymentMode, SecurityConfig, SecurityProfile, ServerConfig, load_config
+from .config import (
+    BridgeConfig,
+    DeploymentMode,
+    SecurityConfig,
+    SecurityProfile,
+    ServerConfig,
+    load_config,
+)
 from .errors import (
     BridgeError,
     ConfigError,
@@ -48,7 +55,6 @@ from .types import (
     InfluenceEvidence,
     InfluenceState,
     InfluenceType,
-    normalize_and_validate_ip,
     PathMatchResult,
     PathPolicy,
     PendingToolApproval,
@@ -68,6 +74,7 @@ from .types import (
     ToolSignalCode,
     ToolState,
     TrustLevel,
+    normalize_and_validate_ip,
 )
 
 __version__ = "1.0.0"

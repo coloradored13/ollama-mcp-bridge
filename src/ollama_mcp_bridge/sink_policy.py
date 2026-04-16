@@ -65,12 +65,27 @@ _HOSTNAME_PATTERN = re.compile(
 # host:port — matches IP:port or hostname:port patterns.
 _HOST_PORT_PATTERN = re.compile(r"\b([a-zA-Z0-9][a-zA-Z0-9._-]*:\d{1,5})\b")
 # Arg field names that indicate outbound destination intent.
-_DESTINATION_FIELD_NAMES = frozenset({
-    "host", "hostname", "server", "endpoint", "uri", "url",
-    "base_url", "webhook_url", "webhook", "callback_url",
-    "destination", "target", "target_url", "recipient",
-    "address", "remote", "remote_host",
-})
+_DESTINATION_FIELD_NAMES = frozenset(
+    {
+        "host",
+        "hostname",
+        "server",
+        "endpoint",
+        "uri",
+        "url",
+        "base_url",
+        "webhook_url",
+        "webhook",
+        "callback_url",
+        "destination",
+        "target",
+        "target_url",
+        "recipient",
+        "address",
+        "remote",
+        "remote_host",
+    }
+)
 
 # Memory-write tool name patterns — uses (?:^|_) and (?:_|$) instead of \b
 # because tool names use underscores (store_memory), and \b treats _ as a word char.
@@ -143,14 +158,16 @@ class TaintTracker:
             return
 
         risk_score = risk_assessment.overall_risk_score if risk_assessment else 0.0
-        self._results.append(TrackedResult(
-            origin_id=origin_id,
-            values=values,
-            risk_score=risk_score,
-        ))
+        self._results.append(
+            TrackedResult(
+                origin_id=origin_id,
+                values=values,
+                risk_score=risk_score,
+            )
+        )
         # Drop oldest if over capacity
         if len(self._results) > self._max_results:
-            self._results = self._results[-self._max_results:]
+            self._results = self._results[-self._max_results :]
 
     def compute_taint(self, args: dict[str, Any]) -> InfluenceState:
         """Check if tool call arguments contain values from previous tool results.
@@ -184,7 +201,8 @@ class TaintTracker:
                     # Try derived match if no exact match
                     if confidence == 0:
                         confidence, influence_type = _derived_match_confidence(
-                            arg_extracted, tracked_val,
+                            arg_extracted,
+                            tracked_val,
                         )
 
                     if confidence > 0 and influence_type is not None:
@@ -194,13 +212,15 @@ class TaintTracker:
                             f"from {tracked.origin_id}"
                         )
                         affected_fields.append(arg_field)
-                        evidence.append(InfluenceEvidence(
-                            influence_type=influence_type,
-                            tracked_value=tracked_val.value[:80],
-                            arg_value=arg_extracted.value[:80],
-                            origin_id=tracked.origin_id,
-                            confidence=confidence,
-                        ))
+                        evidence.append(
+                            InfluenceEvidence(
+                                influence_type=influence_type,
+                                tracked_value=tracked_val.value[:80],
+                                arg_value=arg_extracted.value[:80],
+                                origin_id=tracked.origin_id,
+                                confidence=confidence,
+                            )
+                        )
                         # Amplify confidence if source was risky
                         effective = min(confidence + tracked.risk_score * 0.1, 1.0)
                         max_confidence = max(max_confidence, effective)
@@ -208,21 +228,15 @@ class TaintTracker:
         if not evidence:
             return InfluenceState()
 
-        has_direct = any(
-            e.influence_type == InfluenceType.DIRECT_VALUE_MATCH for e in evidence
-        )
-        has_derived = any(
-            e.influence_type != InfluenceType.DIRECT_VALUE_MATCH for e in evidence
-        )
+        has_direct = any(e.influence_type == InfluenceType.DIRECT_VALUE_MATCH for e in evidence)
+        has_derived = any(e.influence_type != InfluenceType.DIRECT_VALUE_MATCH for e in evidence)
         destination_types = {
             InfluenceType.DERIVED_URL_REUSE,
             InfluenceType.DERIVED_PROTOCOL_CHANGE,
             InfluenceType.DERIVED_HOSTNAME_IN_URL,
             InfluenceType.DERIVED_EMAIL_DOMAIN,
         }
-        has_destination = any(
-            e.influence_type in destination_types for e in evidence
-        )
+        has_destination = any(e.influence_type in destination_types for e in evidence)
 
         return InfluenceState(
             tainted=True,
@@ -349,7 +363,9 @@ class SinkPolicyEngine:
         return SinkType.GENERAL_WRITE
 
     def _all_domains_allowed(
-        self, args: dict[str, Any], allowed_domains: list[str],
+        self,
+        args: dict[str, Any],
+        allowed_domains: list[str],
     ) -> bool:
         """Check if all domains in args are in the allowed list."""
         if not allowed_domains:
@@ -360,23 +376,21 @@ class SinkPolicyEngine:
             return False
 
         return all(
-            any(domain == allowed or domain.endswith(f".{allowed}")
-                for allowed in allowed_domains)
+            any(domain == allowed or domain.endswith(f".{allowed}") for allowed in allowed_domains)
             for domain in domains
         )
 
     def _all_destinations_allowed(
-        self, args: dict[str, Any], policies: list[DestinationPolicy],
+        self,
+        args: dict[str, Any],
+        policies: list[DestinationPolicy],
     ) -> bool:
         """Check if all URLs in args match at least one destination policy."""
         urls = _extract_urls_from_args(args)
         if not urls:
             return False  # no URLs to validate = can't confirm allowed
 
-        return all(
-            any(policy.matches(url).matched for policy in policies)
-            for url in urls
-        )
+        return all(any(policy.matches(url).matched for policy in policies) for url in urls)
 
 
 # --- Module-level helpers ---
@@ -441,7 +455,8 @@ def _extract_values(text: str) -> list[ExtractedValue]:
 
 
 def _extract_values_from_args(
-    args: dict[str, Any], prefix: str = "",
+    args: dict[str, Any],
+    prefix: str = "",
 ) -> list[tuple[str, ExtractedValue]]:
     """Recursively walk args dict and extract trackable values from strings."""
     results: list[tuple[str, ExtractedValue]] = []
@@ -486,8 +501,7 @@ def _match_confidence(arg_val: ExtractedValue, tracked_val: ExtractedValue) -> f
         try:
             arg_domain = urlparse(arg_val.value).hostname
             if arg_domain and (
-                arg_domain == tracked_val.value
-                or arg_domain.endswith(f".{tracked_val.value}")
+                arg_domain == tracked_val.value or arg_domain.endswith(f".{tracked_val.value}")
             ):
                 return 0.7
         except Exception:
@@ -498,8 +512,7 @@ def _match_confidence(arg_val: ExtractedValue, tracked_val: ExtractedValue) -> f
         try:
             tracked_domain = urlparse(tracked_val.value).hostname
             if tracked_domain and (
-                arg_val.value == tracked_domain
-                or arg_val.value.endswith(f".{tracked_domain}")
+                arg_val.value == tracked_domain or arg_val.value.endswith(f".{tracked_domain}")
             ):
                 return 0.7
         except Exception:
@@ -509,7 +522,8 @@ def _match_confidence(arg_val: ExtractedValue, tracked_val: ExtractedValue) -> f
 
 
 def _derived_match_confidence(
-    arg_val: ExtractedValue, tracked_val: ExtractedValue,
+    arg_val: ExtractedValue,
+    tracked_val: ExtractedValue,
 ) -> tuple[float, InfluenceType | None]:
     """Check for derived (non-exact) taint relationships.
 
@@ -522,8 +536,10 @@ def _derived_match_confidence(
         try:
             arg_p = urlparse(arg_val.value)
             tracked_p = urlparse(tracked_val.value)
-            if arg_p.hostname and tracked_p.hostname and (
-                arg_p.hostname.lower() == tracked_p.hostname.lower()
+            if (
+                arg_p.hostname
+                and tracked_p.hostname
+                and (arg_p.hostname.lower() == tracked_p.hostname.lower())
             ):
                 if arg_p.scheme.lower() != tracked_p.scheme.lower():
                     return 0.65, InfluenceType.DERIVED_PROTOCOL_CHANGE
@@ -549,8 +565,9 @@ def _derived_match_confidence(
     # Tracked hostname/domain appears in host:port arg
     if arg_val.kind == "host_port" and tracked_val.kind in ("domain", "hostname"):
         host_part = arg_val.value.rsplit(":", 1)[0]
-        if (host_part.lower() == tracked_val.value.lower()
-                or host_part.lower().endswith(f".{tracked_val.value.lower()}")):
+        if host_part.lower() == tracked_val.value.lower() or host_part.lower().endswith(
+            f".{tracked_val.value.lower()}"
+        ):
             return 0.7, InfluenceType.DERIVED_HOSTNAME_IN_URL
 
     # Hostname cross-kind matching (PR 12 kinds)

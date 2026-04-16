@@ -49,7 +49,6 @@ THREAT MODEL (what we defend against):
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import math
@@ -62,7 +61,9 @@ from typing import Any, Awaitable, Callable, Protocol
 
 import jsonschema
 
+from .adapters import run_adapters
 from .audit import AuditLogger
+from .capabilities import infer_capabilities as _infer_capabilities
 from .config import BridgeConfig, DeploymentMode, SecurityConfig, SecurityProfile
 from .errors import (
     ConfirmationDeniedError,
@@ -70,9 +71,7 @@ from .errors import (
     ParameterRejectedError,
     RateLimitError,
     ToolBlockedError,
-    ToolIntegrityError,
 )
-from .adapters import run_adapters
 from .mcp_client import MCPClientManager
 from .sink_policy import SinkPolicyEngine, TaintTracker
 from .types import (
@@ -103,9 +102,6 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-from .capabilities import infer_capabilities as _infer_capabilities
 
 
 # --- Sanitization Detectors (SAD[2]) ---
@@ -517,9 +513,7 @@ class ParameterValidator:
             # sends. An empty schema means the tool takes no input — the model shouldn't
             # be able to smuggle arbitrary data through an empty-schema tool.
             if schema.get("type") == "object" and "properties" not in schema and params:
-                errors.append(
-                    "Tool schema defines no properties but parameters were provided"
-                )
+                errors.append("Tool schema defines no properties but parameters were provided")
                 return ValidationResult(valid=False, validated_params=validated, errors=errors)
 
             # SEC-5: Inject additionalProperties:false before validation.
@@ -558,9 +552,7 @@ class ParameterValidator:
             errors=errors,
         )
 
-    def _check_param_security(
-        self, name: str, value: Any, schema: dict[str, Any]
-    ) -> list[str]:
+    def _check_param_security(self, name: str, value: Any, schema: dict[str, Any]) -> list[str]:
         """Type-specific security checks for a single parameter."""
         errors: list[str] = []
         param_type = schema.get("type", "string")
@@ -577,11 +569,16 @@ class ParameterValidator:
             # Depth check for nested objects
             depth = self._measure_depth(value)
             if depth > self.MAX_NESTING_DEPTH:
-                errors.append(f"Parameter '{name}': nesting depth {depth} exceeds maximum ({self.MAX_NESTING_DEPTH})")
+                errors.append(
+                    f"Parameter '{name}': nesting depth {depth} "
+                    f"exceeds maximum ({self.MAX_NESTING_DEPTH})"
+                )
 
         elif param_type == "array" and isinstance(value, list):
             if len(value) > 1000:
-                errors.append(f"Parameter '{name}': array length {len(value)} exceeds maximum (1000)")
+                errors.append(
+                    f"Parameter '{name}': array length {len(value)} exceeds maximum (1000)"
+                )
 
         return errors
 
@@ -591,9 +588,7 @@ class ParameterValidator:
         if len(value) > 10000:
             errors.append(f"Parameter '{name}': exceeds maximum length (10000)")
         if self.DANGEROUS_CHARS.search(value):
-            errors.append(
-                f"Parameter '{name}': contains potentially dangerous characters"
-            )
+            errors.append(f"Parameter '{name}': contains potentially dangerous characters")
         if self.PATH_TRAVERSAL.search(value):
             errors.append(f"Parameter '{name}': contains path traversal pattern")
         return errors
@@ -601,9 +596,7 @@ class ParameterValidator:
     # Maximum nesting depth for both schema check and deep scan.
     MAX_NESTING_DEPTH = 5
 
-    def _deep_scan_values(
-        self, obj: Any, path: str = "$", depth: int = 0
-    ) -> list[str]:
+    def _deep_scan_values(self, obj: Any, path: str = "$", depth: int = 0) -> list[str]:
         """Recursively scan all values for string-level threats.
 
         This catches dangerous strings buried inside nested dicts and arrays
@@ -636,15 +629,11 @@ class ParameterValidator:
         if isinstance(obj, dict):
             if not obj:
                 return current
-            return max(
-                ParameterValidator._measure_depth(v, current + 1) for v in obj.values()
-            )
+            return max(ParameterValidator._measure_depth(v, current + 1) for v in obj.values())
         if isinstance(obj, list):
             if not obj:
                 return current
-            return max(
-                ParameterValidator._measure_depth(item, current + 1) for item in obj
-            )
+            return max(ParameterValidator._measure_depth(item, current + 1) for item in obj)
         return current
 
 
@@ -794,7 +783,9 @@ class SemanticRiskAssessor:
         self._encoding_detector = EncodingObfuscationDetector()
 
     def assess(
-        self, content: str, provenance: ContentProvenance | None = None,
+        self,
+        content: str,
+        provenance: ContentProvenance | None = None,
     ) -> SemanticRiskAssessment:
         """Assess content for semantic manipulation risks.
 
@@ -808,15 +799,13 @@ class SemanticRiskAssessor:
         # For tool results, bare URLs are expected (search results, API responses)
         # and shouldn't trigger exfiltration on their own. Behavioral patterns
         # (webhook, curl, send to) are suspicious in any context.
-        is_tool_result = (
-            provenance is not None
-            and provenance.source_type == SourceType.TOOL_RESULT
-        )
+        is_tool_result = provenance is not None and provenance.source_type == SourceType.TOOL_RESULT
 
         instruction_score = self._instruction_detector.scan(content)
         cross_tool_score = self._cross_tool_detector.scan(content)
         exfiltration_score = self._exfiltration_detector.scan(
-            content, in_tool_result=is_tool_result,
+            content,
+            in_tool_result=is_tool_result,
         )
         escalation_score = self._escalation_detector.scan(content)
         role_score = self._role_detector.scan(content)
@@ -927,8 +916,7 @@ class SemanticRiskAssessor:
         parts.append(f"Signals: {', '.join(signals)}.")
         if provenance:
             parts.append(
-                f"Source: {provenance.source_type.value} "
-                f"(trust: {provenance.trust_level.value})."
+                f"Source: {provenance.source_type.value} (trust: {provenance.trust_level.value})."
             )
         return " ".join(parts)
 
@@ -992,7 +980,9 @@ class ToolApprovalRegistry:
                 logger.warning("Skipping invalid registry entry for key '%s'", key)
 
         if migrated:
-            logger.info("Migrated %d legacy registry entries to structured format", len(self._entries))
+            logger.info(
+                "Migrated %d legacy registry entries to structured format", len(self._entries)
+            )
             self._save()
 
     def _save(self) -> None:
@@ -1431,12 +1421,16 @@ class SecurityGateway:
                 )
 
             approved_tool = self._make_approved_tool(
-                server, original_tool, pending.sanitization_result,
+                server,
+                original_tool,
+                pending.sanitization_result,
             )
 
             # Profile check — same enforcement as connect_and_scan (PR 16)
             profile_error = self._check_profile_requirements(
-                server, tool_name, approved_tool,
+                server,
+                tool_name,
+                approved_tool,
             )
             if profile_error:
                 self._audit.log_event(
@@ -1481,7 +1475,8 @@ class SecurityGateway:
                 # Tool was blocked at scan time; schema is in _discovered_tools
                 discovered = self._discovered_tools.get(server, [])
                 original_tool = next(
-                    (t for t in discovered if t.name == tool_name), None,
+                    (t for t in discovered if t.name == tool_name),
+                    None,
                 )
                 if original_tool is None:
                     raise ToolBlockedError(
@@ -1494,7 +1489,9 @@ class SecurityGateway:
 
             # Profile check — same enforcement as connect_and_scan (PR 16)
             profile_error = self._check_profile_requirements(
-                server, tool_name, approved_tool,
+                server,
+                tool_name,
+                approved_tool,
             )
             if profile_error:
                 self._audit.log_event(
@@ -1517,9 +1514,7 @@ class SecurityGateway:
             self._approved_tools[approved_tool.namespaced_name] = approved_tool
             # Dedup guard: remove stale entry before appending (defensive)
             server_tools = self._tools_by_server.setdefault(server, [])
-            self._tools_by_server[server] = [
-                t for t in server_tools if t.name != tool_name
-            ]
+            self._tools_by_server[server] = [t for t in server_tools if t.name != tool_name]
             self._tools_by_server[server].append(approved_tool)
 
             self._audit.log_event(
@@ -1531,7 +1526,9 @@ class SecurityGateway:
                 definition_hash=original_tool.definition_hash,
             )
             logger.info(
-                "Re-approved tool '%s' on '%s' after rug-pull block", tool_name, server,
+                "Re-approved tool '%s' on '%s' after rug-pull block",
+                tool_name,
+                server,
             )
 
         elif state == ToolState.APPROVED:
@@ -1597,9 +1594,7 @@ class SecurityGateway:
 
                 # Remove from server list
                 server_tools = self._tools_by_server.get(server, [])
-                self._tools_by_server[server] = [
-                    t for t in server_tools if t.name != tool_name
-                ]
+                self._tools_by_server[server] = [t for t in server_tools if t.name != tool_name]
 
             self._tool_states[tool_key] = ToolState.DENIED_BY_USER
 
@@ -1639,7 +1634,10 @@ class SecurityGateway:
             )
 
     def _check_profile_requirements(
-        self, server_name: str, tool_name: str, approved: ApprovedTool,
+        self,
+        server_name: str,
+        tool_name: str,
+        approved: ApprovedTool,
     ) -> str | None:
         """Check whether a tool meets the active security profile's requirements.
 
@@ -1659,7 +1657,11 @@ class SecurityGateway:
             is_high_consequence = profile == SecurityProfile.HIGH_CONSEQUENCE
 
             # HIGH_CONSEQUENCE only: dangerous tools must have explicit capability manifest
-            if is_high_consequence and caps.is_dangerous and caps.source == CapabilitySource.INFERRED:
+            if (
+                is_high_consequence
+                and caps.is_dangerous
+                and caps.source == CapabilitySource.INFERRED
+            ):
                 return (
                     f"high_consequence profile requires explicit capability manifest "
                     f"for dangerous tool '{tool_name}' (currently inferred-only). "
@@ -1684,7 +1686,10 @@ class SecurityGateway:
                             "destination policy (capability inferred — add explicit config to "
                             "enforce policy or confirm capability with "
                             "[capabilities.%s.%s])",
-                            tool_name, server_name, server_name, tool_name,
+                            tool_name,
+                            server_name,
+                            server_name,
+                            tool_name,
                         )
 
             # Filesystem-write/delete tools require path policy.
@@ -1702,7 +1707,10 @@ class SecurityGateway:
                         logger.warning(
                             "HARDENED profile: filesystem-write tool '%s' on '%s' has no "
                             "path policy (capability inferred — add [paths.%s.%s] to config)",
-                            tool_name, server_name, server_name, tool_name,
+                            tool_name,
+                            server_name,
+                            server_name,
+                            tool_name,
                         )
 
             # Messaging tools require recipient policy.
@@ -1721,11 +1729,17 @@ class SecurityGateway:
                             "HARDENED profile: messaging tool '%s' on '%s' has no "
                             "recipient policy (capability inferred — add "
                             "[recipients.%s.%s] to config)",
-                            tool_name, server_name, server_name, tool_name,
+                            tool_name,
+                            server_name,
+                            server_name,
+                            tool_name,
                         )
 
             # Memory-write tools blocked unless explicitly allowed
-            if caps.memory_write and not self._security.allow_memory_writes_from_third_party_content:
+            if (
+                caps.memory_write
+                and not self._security.allow_memory_writes_from_third_party_content
+            ):
                 profile_name = "high_consequence" if is_high_consequence else "hardened"
                 return (
                     f"{profile_name} profile blocks memory-write tool '{tool_name}' "
@@ -1810,13 +1824,11 @@ class SecurityGateway:
                 )
             if not self._security.require_filesystem_sandbox:
                 raise ConfigError(
-                    "deployment_mode='high_consequence' requires "
-                    "require_filesystem_sandbox=True"
+                    "deployment_mode='high_consequence' requires require_filesystem_sandbox=True"
                 )
             if not self._security.require_secret_scoping:
                 raise ConfigError(
-                    "deployment_mode='high_consequence' requires "
-                    "require_secret_scoping=True"
+                    "deployment_mode='high_consequence' requires require_secret_scoping=True"
                 )
 
         for w in warnings:
@@ -1825,7 +1837,10 @@ class SecurityGateway:
         return warnings
 
     def _make_approved_tool(
-        self, server_name: str, tool: ToolSchema, san_result: SanitizationResult,
+        self,
+        server_name: str,
+        tool: ToolSchema,
+        san_result: SanitizationResult,
     ) -> ApprovedTool:
         """Create an ApprovedTool from a ToolSchema that passed all checks."""
         classification = self._config.get_tool_classification(server_name, tool.name)
@@ -1873,7 +1888,8 @@ class SecurityGateway:
                 logger.warning(
                     "Server '%s': discovered %d tool(s) but none are in allowed_tools — "
                     "no tools will be available. Add tools to allowed_tools in config.",
-                    server_name, len(tools),
+                    server_name,
+                    len(tools),
                 )
 
             for tool in tools:
@@ -1882,7 +1898,9 @@ class SecurityGateway:
 
                 # Check allowlist (SR-4)
                 if not self._config.is_tool_allowed(server_name, tool.name):
-                    logger.info("Tool '%s' on '%s' not in allowlist — skipped", tool.name, server_name)
+                    logger.info(
+                        "Tool '%s' on '%s' not in allowlist — skipped", tool.name, server_name
+                    )
                     continue
 
                 self._tool_states[tool_key] = ToolState.ALLOWLISTED
@@ -1899,7 +1917,9 @@ class SecurityGateway:
                 if tool_risk.overall_risk_score > 0.0:
                     logger.debug(
                         "Semantic risk for tool '%s' on '%s': score=%.2f signals=%s",
-                        tool.name, server_name, tool_risk.overall_risk_score,
+                        tool.name,
+                        server_name,
+                        tool_risk.overall_risk_score,
                         tool_risk.raw_signals,
                     )
 
@@ -1914,7 +1934,10 @@ class SecurityGateway:
                     )
                     logger.warning(
                         "BLOCKED tool '%s' on '%s': score=%.0f rules=%s",
-                        tool.name, server_name, san_result.score, san_result.triggered_rules,
+                        tool.name,
+                        server_name,
+                        san_result.score,
+                        san_result.triggered_rules,
                     )
                     scan_result.blocked_sanitization.append((server_name, tool.name))
                     continue
@@ -1929,7 +1952,10 @@ class SecurityGateway:
                     )
                     logger.warning(
                         "WARNING on tool '%s' on '%s': score=%.0f rules=%s",
-                        tool.name, server_name, san_result.score, san_result.triggered_rules,
+                        tool.name,
+                        server_name,
+                        san_result.score,
+                        san_result.triggered_rules,
                     )
 
                 # Check rug pull (SR-2)
@@ -1946,12 +1972,15 @@ class SecurityGateway:
                         AuditEventType.TOOL_REAPPROVAL_REQUIRED,
                         server=server_name,
                         tool=tool.name,
-                        reason="Use approve_tool() to re-approve after reviewing the new definition",
+                        reason=(
+                            "Use approve_tool() to re-approve after reviewing the new definition"
+                        ),
                         definition_hash=tool.definition_hash,
                     )
                     logger.error(
                         "RUG PULL detected: tool '%s' on '%s' definition changed!",
-                        tool.name, server_name,
+                        tool.name,
+                        server_name,
                     )
                     scan_result.blocked_integrity.append((server_name, tool.name))
                     continue
@@ -1959,7 +1988,9 @@ class SecurityGateway:
                 # Profile requirements check (PR 16) — before approval decision
                 profile_candidate = self._make_approved_tool(server_name, tool, san_result)
                 profile_error = self._check_profile_requirements(
-                    server_name, tool.name, profile_candidate,
+                    server_name,
+                    tool.name,
+                    profile_candidate,
                 )
                 if profile_error:
                     self._tool_states[tool_key] = ToolState.BLOCKED_PROFILE
@@ -1971,7 +2002,9 @@ class SecurityGateway:
                     )
                     logger.warning(
                         "BLOCKED tool '%s' on '%s': %s",
-                        tool.name, server_name, profile_error,
+                        tool.name,
+                        server_name,
+                        profile_error,
                     )
                     scan_result.blocked_sanitization.append((server_name, tool.name))
                     continue
@@ -1998,7 +2031,8 @@ class SecurityGateway:
                     self._approved_tools[approved_tool.namespaced_name] = approved_tool
                     logger.info(
                         "Auto-approved first-seen tool '%s' on '%s' (auto_approve_first_seen=True)",
-                        tool.name, server_name,
+                        tool.name,
+                        server_name,
                     )
 
                 elif not self._security.require_first_run_approval:
@@ -2036,7 +2070,8 @@ class SecurityGateway:
                     )
                     logger.info(
                         "Tool '%s' on '%s' pending first-run approval",
-                        tool.name, server_name,
+                        tool.name,
+                        server_name,
                     )
 
             self._tools_by_server[server_name] = approved_for_server
@@ -2093,7 +2128,9 @@ class SecurityGateway:
                     approval_mode=ApprovalMode.FIRST_RUN_EXPLICIT.value,
                     definition_hash=original_tool.definition_hash,
                 )
-                logger.info("User approved first-seen tool '%s' on '%s'", pending.name, pending.server)
+                logger.info(
+                    "User approved first-seen tool '%s' on '%s'", pending.name, pending.server
+                )
             else:
                 # Denied by user — record hash so we remember this decision
                 self._tool_states[tool_key] = ToolState.DENIED_BY_USER
@@ -2109,7 +2146,9 @@ class SecurityGateway:
                     definition_hash=original_tool.definition_hash,
                     reason="User denied first-seen tool",
                 )
-                logger.info("User denied first-seen tool '%s' on '%s'", pending.name, pending.server)
+                logger.info(
+                    "User denied first-seen tool '%s' on '%s'", pending.name, pending.server
+                )
 
         # Remove resolved tools from pending list
         resolved_keys = {p.key for p in resolved}
@@ -2152,8 +2191,7 @@ class SecurityGateway:
         if not approved:
             # Try bare name match — reject if ambiguous across servers
             bare_matches = [
-                t for t in self._approved_tools.values()
-                if t.name == tool_call.tool_name
+                t for t in self._approved_tools.values() if t.name == tool_call.tool_name
             ]
             if len(bare_matches) == 1:
                 approved = bare_matches[0]
@@ -2245,9 +2283,7 @@ class SecurityGateway:
                     reason="User denied confirmation",
                     confirmation_outcome=outcome.value,
                 )
-                raise ConfirmationDeniedError(
-                    f"User denied destructive action: {approved.name}"
-                )
+                raise ConfirmationDeniedError(f"User denied destructive action: {approved.name}")
         elif gate_decision == GateDecision.DENIED:
             self._audit.log_event(
                 AuditEventType.TOOL_DENIED,
@@ -2261,9 +2297,13 @@ class SecurityGateway:
             )
 
         # 4. Sink policy — taint tracking (PR 7) + destination policies (PR 11)
-        destination_policies = self._config.get_destination_policies(
-            approved.server, approved.name,
-        ) or None
+        destination_policies = (
+            self._config.get_destination_policies(
+                approved.server,
+                approved.name,
+            )
+            or None
+        )
         taint_state = self._taint_tracker.compute_taint(tool_call.arguments)
         if taint_state.tainted:
             sink_decision = self._sink_policy.evaluate(
@@ -2305,8 +2345,7 @@ class SecurityGateway:
                         server=approved.server,
                         tool=approved.name,
                         reason=(
-                            f"User confirmed tainted sink: "
-                            f"sources={taint_state.taint_sources}"
+                            f"User confirmed tainted sink: sources={taint_state.taint_sources}"
                         ),
                         confirmation_outcome=outcome.value,
                     )
@@ -2319,8 +2358,7 @@ class SecurityGateway:
                         confirmation_outcome=outcome.value,
                     )
                     raise ConfirmationDeniedError(
-                        f"Tainted sink confirmation {outcome.value} "
-                        f"for '{approved.name}'"
+                        f"Tainted sink confirmation {outcome.value} for '{approved.name}'"
                     )
 
             if sink_decision == SinkDecision.ALLOW_WITH_NOTICE:
@@ -2335,15 +2373,20 @@ class SecurityGateway:
                     ),
                 )
 
-        # 5. Capability narrowing — safe adapters (PR 8) + destination/path/recipient policies (PR 11/14/15)
+        # 5. Capability narrowing — safe adapters (PR 8) + destination/path/recipient
+        #    policies (PR 11/14/15)
         path_policy = self._config.get_path_policy(
-            approved.server, approved.name,
+            approved.server,
+            approved.name,
         )
         recipient_policy = self._config.get_recipient_policy(
-            approved.server, approved.name,
+            approved.server,
+            approved.name,
         )
         adapter_errors = run_adapters(
-            approved, tool_call.arguments, self._security,
+            approved,
+            tool_call.arguments,
+            self._security,
             destination_policies=destination_policies,
             path_policy=path_policy,
             recipient_policy=recipient_policy,
@@ -2407,8 +2450,8 @@ class SecurityGateway:
             can_issue_instructions=False,
             can_contain_sensitive_data=True,
         )
-        sanitized_content, tier, risk_assessment = (
-            self._result_sanitizer.sanitize_and_assess(raw_result, provenance)
+        sanitized_content, tier, risk_assessment = self._result_sanitizer.sanitize_and_assess(
+            raw_result, provenance
         )
 
         if tier == ResultSanitizationTier.QUARANTINED:

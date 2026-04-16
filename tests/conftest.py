@@ -20,9 +20,7 @@ from ollama_mcp_bridge.types import (
     OllamaToolCall,
     ToolSchema,
 )
-
 from tests.helpers import TEST_MCP_SERVER
-
 
 # --- Ollama model picker ---
 
@@ -138,15 +136,6 @@ async def live_bridge(tmp_path):
             await bridge._disconnect()
         except Exception:
             pass
-
-
-@pytest.fixture
-def ollama_model() -> str:
-    """Return the smallest available Ollama model name."""
-    model = _pick_model()
-    if not model:
-        pytest.skip("No Ollama models available")
-    return model
 
 
 @pytest.fixture

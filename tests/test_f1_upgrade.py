@@ -32,7 +32,6 @@ from ollama_mcp_bridge.types import (
     normalize_and_validate_ip,
 )
 
-
 # ---------------------------------------------------------------------------
 # Q1: trace_id + bridge_version on ToolCallRecord / BridgeResult
 # ---------------------------------------------------------------------------
@@ -46,9 +45,7 @@ class TestProvenanceFields:
 
     def test_tool_call_record_accepts_trace_id(self):
         """trace_id field accepts a UUID string."""
-        rec = ToolCallRecord(
-            server="s", tool_name="t", arguments={}, trace_id="abc-123"
-        )
+        rec = ToolCallRecord(server="s", tool_name="t", arguments={}, trace_id="abc-123")
         assert rec.trace_id == "abc-123"
 
     def test_bridge_result_has_trace_id_default(self):
@@ -63,9 +60,7 @@ class TestProvenanceFields:
 
     def test_bridge_result_accepts_trace_id_and_version(self):
         """BridgeResult accepts trace_id and bridge_version."""
-        result = BridgeResult(
-            content="hello", trace_id="abc-123", bridge_version="1.0.0"
-        )
+        result = BridgeResult(content="hello", trace_id="abc-123", bridge_version="1.0.0")
         assert result.trace_id == "abc-123"
         assert result.bridge_version == "1.0.0"
 
@@ -299,6 +294,7 @@ class TestSafeURLRawHostArgs:
 
     def _make_tool(self) -> "ApprovedTool":
         from ollama_mcp_bridge.types import ApprovedTool
+
         return ApprovedTool(
             server="test",
             name="http_request",
@@ -323,7 +319,9 @@ class TestSafeURLRawHostArgs:
 
         # The "host" arg is a raw IP, not a URL — old code missed this
         errors = adapter.check(
-            tool, {"host": "10.0.0.1", "port": 8080}, config,
+            tool,
+            {"host": "10.0.0.1", "port": 8080},
+            config,
             destination_policies=policies,
         )
         assert len(errors) >= 1
@@ -340,7 +338,9 @@ class TestSafeURLRawHostArgs:
         policies = [DestinationPolicy(host="api.example.com", port=8443)]
 
         errors = adapter.check(
-            tool, {"url": "https://api.example.com:9999/v1"}, config,
+            tool,
+            {"url": "https://api.example.com:9999/v1"},
+            config,
             destination_policies=policies,
         )
         # Exactly 1 error — URL check fires, raw host check skips same field
@@ -376,12 +376,13 @@ class TestHardenedProfileNarrowing:
 
     def _make_security_gateway(self, profile, server_name="test-server"):
         """Build a minimal SecurityGateway enough to call _check_profile_requirements."""
-        import tempfile
         import os
-        from ollama_mcp_bridge.config import BridgeConfig, SecurityConfig
-        from ollama_mcp_bridge.audit import AuditLogger
-        from ollama_mcp_bridge.security import SecurityGateway
+        import tempfile
         from unittest.mock import MagicMock
+
+        from ollama_mcp_bridge.audit import AuditLogger
+        from ollama_mcp_bridge.config import BridgeConfig, SecurityConfig
+        from ollama_mcp_bridge.security import SecurityGateway
 
         tmpdir = tempfile.mkdtemp()
         registry_path = os.path.join(tmpdir, "registry.json")
@@ -401,6 +402,7 @@ class TestHardenedProfileNarrowing:
 
     def _make_outbound_tool_config_source(self, server="test-server", name="send_data"):
         from ollama_mcp_bridge.types import ApprovedTool
+
         return ApprovedTool(
             server=server,
             name=name,
@@ -416,6 +418,7 @@ class TestHardenedProfileNarrowing:
 
     def _make_outbound_tool_inferred_source(self, server="test-server", name="send_data"):
         from ollama_mcp_bridge.types import ApprovedTool
+
         return ApprovedTool(
             server=server,
             name=name,
@@ -432,6 +435,7 @@ class TestHardenedProfileNarrowing:
     def test_hardened_config_source_outbound_no_policy_returns_error(self):
         """HARDENED + CONFIG-source outbound tool + no DestinationPolicy = error string."""
         from ollama_mcp_bridge.config import SecurityProfile
+
         gw = self._make_security_gateway(SecurityProfile.HARDENED)
         tool = self._make_outbound_tool_config_source()
 
@@ -443,6 +447,7 @@ class TestHardenedProfileNarrowing:
     def test_hardened_inferred_source_outbound_no_policy_returns_none(self):
         """HARDENED + INFERRED-source outbound tool + no policy = warn only (None return)."""
         from ollama_mcp_bridge.config import SecurityProfile
+
         gw = self._make_security_gateway(SecurityProfile.HARDENED)
         tool = self._make_outbound_tool_inferred_source()
 
@@ -453,6 +458,7 @@ class TestHardenedProfileNarrowing:
     def test_standard_profile_outbound_no_policy_passes(self):
         """STANDARD profile does not enforce policy presence."""
         from ollama_mcp_bridge.config import SecurityProfile
+
         gw = self._make_security_gateway(SecurityProfile.STANDARD)
         tool = self._make_outbound_tool_config_source()
 
@@ -468,13 +474,14 @@ class TestHardenedProfileNarrowing:
         on CONFIG-source capability absence).
         """
         from ollama_mcp_bridge.config import SecurityProfile
+
         gw = self._make_security_gateway(SecurityProfile.HIGH_CONSEQUENCE)
         tool = self._make_outbound_tool_inferred_source()
 
         error = gw._check_profile_requirements("test-server", "send_data", tool)
         assert error is not None
         # HIGH_CONSEQUENCE blocks on either: manifest required OR destination policy required
-        assert ("capability manifest" in error.lower() or "destination policy" in error.lower())
+        assert "capability manifest" in error.lower() or "destination policy" in error.lower()
 
     def test_hardened_filesystem_write_config_source_no_policy_returns_error(self):
         """HARDENED + CONFIG filesystem-write tool + no PathPolicy = error."""
@@ -529,10 +536,12 @@ class TestCapabilitySourceAwareMemoryWrite:
 
     def _make_config(self):
         from ollama_mcp_bridge.config import SecurityConfig
+
         return SecurityConfig(sanitization_block_threshold=50.0)
 
     def test_config_source_memory_write_activates_adapter(self):
-        """A tool with capabilities.memory_write=True activates the adapter even with a non-memory name."""
+        """Tool with capabilities.memory_write=True activates the adapter
+        even when the tool has a non-memory name."""
         from ollama_mcp_bridge.adapters import SafeMemoryWriteCandidate
         from ollama_mcp_bridge.types import ApprovedTool
 
@@ -652,10 +661,14 @@ class TestQ3SignalWiring:
         """ToolBlockedError from SecurityGateway → ToolCallRecord.signal == FAILURE."""
         loop, ollama, security = _make_loop_with_approved_tool()
 
-        ollama.chat = AsyncMock(side_effect=[
-            _mock_response(tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]),
-            _mock_response(content="done"),
-        ])
+        ollama.chat = AsyncMock(
+            side_effect=[
+                _mock_response(
+                    tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]
+                ),
+                _mock_response(content="done"),
+            ]
+        )
         security.execute_tool = AsyncMock(
             side_effect=ToolBlockedError("blocked", reason="policy_violation")
         )
@@ -671,10 +684,14 @@ class TestQ3SignalWiring:
         """ConfirmationDeniedError → ToolCallRecord.signal == FAILURE."""
         loop, ollama, security = _make_loop_with_approved_tool()
 
-        ollama.chat = AsyncMock(side_effect=[
-            _mock_response(tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]),
-            _mock_response(content="done"),
-        ])
+        ollama.chat = AsyncMock(
+            side_effect=[
+                _mock_response(
+                    tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]
+                ),
+                _mock_response(content="done"),
+            ]
+        )
         security.execute_tool = AsyncMock(side_effect=ConfirmationDeniedError())
 
         result = await loop.execute("test", model="m")
@@ -686,10 +703,14 @@ class TestQ3SignalWiring:
         """ParameterRejectedError → ToolCallRecord.signal == INVALID_STATE."""
         loop, ollama, security = _make_loop_with_approved_tool()
 
-        ollama.chat = AsyncMock(side_effect=[
-            _mock_response(tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]),
-            _mock_response(content="done"),
-        ])
+        ollama.chat = AsyncMock(
+            side_effect=[
+                _mock_response(
+                    tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]
+                ),
+                _mock_response(content="done"),
+            ]
+        )
         security.execute_tool = AsyncMock(
             side_effect=ParameterRejectedError(["query must be a string"])
         )
@@ -703,10 +724,14 @@ class TestQ3SignalWiring:
         """RateLimitError → ToolCallRecord.signal == TIMEOUT."""
         loop, ollama, security = _make_loop_with_approved_tool()
 
-        ollama.chat = AsyncMock(side_effect=[
-            _mock_response(tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]),
-            _mock_response(content="done"),
-        ])
+        ollama.chat = AsyncMock(
+            side_effect=[
+                _mock_response(
+                    tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]
+                ),
+                _mock_response(content="done"),
+            ]
+        )
         security.execute_tool = AsyncMock(
             side_effect=RateLimitError("rate limit hit", retry_after_seconds=0)
         )
@@ -720,10 +745,14 @@ class TestQ3SignalWiring:
         """MCPToolError → ToolCallRecord.signal == FAILURE."""
         loop, ollama, security = _make_loop_with_approved_tool()
 
-        ollama.chat = AsyncMock(side_effect=[
-            _mock_response(tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]),
-            _mock_response(content="done"),
-        ])
+        ollama.chat = AsyncMock(
+            side_effect=[
+                _mock_response(
+                    tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]
+                ),
+                _mock_response(content="done"),
+            ]
+        )
         security.execute_tool = AsyncMock(
             side_effect=MCPToolError("remote error", safe_message="tool failed")
         )
@@ -737,16 +766,22 @@ class TestQ3SignalWiring:
         """Successful execution → ToolCallRecord.signal == SUCCESS."""
         loop, ollama, security = _make_loop_with_approved_tool()
 
-        ollama.chat = AsyncMock(side_effect=[
-            _mock_response(tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]),
-            _mock_response(content="done"),
-        ])
-        security.execute_tool = AsyncMock(return_value=ExecutionResult(
-            content="result data",
-            server="test-server",
-            tool_name="recall",
-            duration_ms=10.0,
-        ))
+        ollama.chat = AsyncMock(
+            side_effect=[
+                _mock_response(
+                    tool_calls=[{"name": "test-server__recall", "arguments": {"query": "x"}}]
+                ),
+                _mock_response(content="done"),
+            ]
+        )
+        security.execute_tool = AsyncMock(
+            return_value=ExecutionResult(
+                content="result data",
+                server="test-server",
+                tool_name="recall",
+                duration_ms=10.0,
+            )
+        )
 
         result = await loop.execute("test", model="m")
 

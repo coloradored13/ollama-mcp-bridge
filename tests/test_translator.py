@@ -1,7 +1,7 @@
 """Tests for translator.py — schema translation."""
 
-from ollama_mcp_bridge.translator import ToolTranslator, _resolve_refs, _flatten_union_types
-from ollama_mcp_bridge.types import ActionClass, ApprovedTool, OllamaToolCall
+from ollama_mcp_bridge.translator import ToolTranslator, _flatten_union_types, _resolve_refs
+from ollama_mcp_bridge.types import ApprovedTool, OllamaToolCall
 
 
 class TestResolveRefs:

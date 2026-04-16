@@ -18,7 +18,6 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-
 server = Server("test-tools")
 
 
@@ -67,7 +66,9 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="flaky_tool",
-            description="A tool that fails when input contains 'fail'. Use for testing error handling.",
+            description=(
+                "A tool that fails when input contains 'fail'. Use for testing error handling."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {

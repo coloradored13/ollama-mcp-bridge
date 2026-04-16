@@ -2,9 +2,8 @@
 
 import pytest
 
-from ollama_mcp_bridge.capabilities import infer_capabilities, _extract_schema_fields
-from ollama_mcp_bridge.types import CapabilitySource, ToolCapabilityManifest, ToolSchema
-
+from ollama_mcp_bridge.capabilities import _extract_schema_fields, infer_capabilities
+from ollama_mcp_bridge.types import CapabilitySource, ToolSchema
 
 # --- Helpers ---
 
@@ -86,9 +85,12 @@ class TestNetworkAccess:
     """Tools that send data externally should flag network + outbound."""
 
     def test_send_email(self):
-        result = infer_capabilities(_make_tool(
-            "send_email", "Send an email to a recipient",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "send_email",
+                "Send an email to a recipient",
+            )
+        )
         assert result.network_access
         assert result.outbound_data_transfer
         assert result.external_messaging
@@ -100,23 +102,32 @@ class TestNetworkAccess:
         assert result.outbound_data_transfer
 
     def test_post_webhook(self):
-        result = infer_capabilities(_make_tool(
-            "post_webhook", "Post data to a webhook",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "post_webhook",
+                "Post data to a webhook",
+            )
+        )
         assert result.network_access
         assert result.outbound_data_transfer
 
     def test_upload_file(self):
-        result = infer_capabilities(_make_tool(
-            "upload_file", "Upload a file to the server",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "upload_file",
+                "Upload a file to the server",
+            )
+        )
         assert result.network_access
         assert result.outbound_data_transfer
 
     def test_download_tool(self):
-        result = infer_capabilities(_make_tool(
-            "download_artifact", "Download build artifact",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "download_artifact",
+                "Download build artifact",
+            )
+        )
         assert result.network_access
 
 
@@ -132,9 +143,13 @@ class TestSchemaFieldDetection:
             "type": "object",
             "properties": {"url": {"type": "string"}, "format": {"type": "string"}},
         }
-        result = infer_capabilities(_make_tool(
-            "process_data", "Process some data", schema,
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "process_data",
+                "Process some data",
+                schema,
+            )
+        )
         assert result.network_access
         assert result.outbound_data_transfer
 
@@ -143,9 +158,13 @@ class TestSchemaFieldDetection:
             "type": "object",
             "properties": {"endpoint": {"type": "string"}},
         }
-        result = infer_capabilities(_make_tool(
-            "run_task", "Run a generic task", schema,
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "run_task",
+                "Run a generic task",
+                schema,
+            )
+        )
         assert result.network_access
 
     def test_webhook_field_triggers_network(self):
@@ -153,9 +172,13 @@ class TestSchemaFieldDetection:
             "type": "object",
             "properties": {"webhook": {"type": "string"}},
         }
-        result = infer_capabilities(_make_tool(
-            "notify_complete", "Notify when complete", schema,
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "notify_complete",
+                "Notify when complete",
+                schema,
+            )
+        )
         assert result.network_access
 
     def test_password_field_triggers_credential(self):
@@ -167,9 +190,13 @@ class TestSchemaFieldDetection:
                 "password": {"type": "string"},
             },
         }
-        result = infer_capabilities(_make_tool(
-            "authenticate_user", "Log in a user", schema,
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "authenticate_user",
+                "Log in a user",
+                schema,
+            )
+        )
         assert result.credential_access
 
     def test_api_key_field_triggers_credential(self):
@@ -177,9 +204,13 @@ class TestSchemaFieldDetection:
             "type": "object",
             "properties": {"api_key": {"type": "string"}},
         }
-        result = infer_capabilities(_make_tool(
-            "configure_service", "Configure a service", schema,
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "configure_service",
+                "Configure a service",
+                schema,
+            )
+        )
         assert result.credential_access
 
     def test_secret_field_triggers_credential(self):
@@ -187,9 +218,13 @@ class TestSchemaFieldDetection:
             "type": "object",
             "properties": {"client_secret": {"type": "string"}},
         }
-        result = infer_capabilities(_make_tool(
-            "setup_oauth", "Set up OAuth flow", schema,
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "setup_oauth",
+                "Set up OAuth flow",
+                schema,
+            )
+        )
         assert result.credential_access
 
     def test_benign_fields_no_flags(self):
@@ -202,9 +237,13 @@ class TestSchemaFieldDetection:
                 "offset": {"type": "integer"},
             },
         }
-        result = infer_capabilities(_make_tool(
-            "search_records", "Search the database", schema,
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "search_records",
+                "Search the database",
+                schema,
+            )
+        )
         assert not result.network_access
         assert not result.credential_access
 
@@ -214,42 +253,60 @@ class TestSchemaFieldDetection:
 
 class TestFilesystemCapabilities:
     def test_write_file(self):
-        result = infer_capabilities(_make_tool(
-            "write_file", "Write content to a file",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "write_file",
+                "Write content to a file",
+            )
+        )
         assert result.filesystem_write
         assert not result.filesystem_delete
 
     def test_save_document(self):
-        result = infer_capabilities(_make_tool(
-            "save_document", "Save a document to disk",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "save_document",
+                "Save a document to disk",
+            )
+        )
         assert result.filesystem_write
 
     def test_delete_file(self):
-        result = infer_capabilities(_make_tool(
-            "delete_file", "Delete a file from disk",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "delete_file",
+                "Delete a file from disk",
+            )
+        )
         assert result.filesystem_delete
         assert result.is_dangerous
 
     def test_list_directory(self):
-        result = infer_capabilities(_make_tool(
-            "list_directory", "List files in a directory",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "list_directory",
+                "List files in a directory",
+            )
+        )
         assert result.filesystem_read
         assert not result.filesystem_write
 
     def test_mkdir_flags_write(self):
-        result = infer_capabilities(_make_tool(
-            "mkdir", "Create a directory",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "mkdir",
+                "Create a directory",
+            )
+        )
         assert result.filesystem_write
 
     def test_rm_flags_delete(self):
-        result = infer_capabilities(_make_tool(
-            "rm", "Remove a file",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "rm",
+                "Remove a file",
+            )
+        )
         assert result.filesystem_delete
 
 
@@ -258,47 +315,68 @@ class TestFilesystemCapabilities:
 
 class TestMemoryWrite:
     def test_store_memory(self):
-        result = infer_capabilities(_make_tool(
-            "store_memory", "Store a memory for later recall",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "store_memory",
+                "Store a memory for later recall",
+            )
+        )
         assert result.memory_write
 
     def test_save_note(self):
-        result = infer_capabilities(_make_tool(
-            "save_note", "Save a note to the knowledge base",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "save_note",
+                "Save a note to the knowledge base",
+            )
+        )
         assert result.memory_write
 
     def test_create_knowledge(self):
-        result = infer_capabilities(_make_tool(
-            "create_knowledge", "Create a knowledge entry",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "create_knowledge",
+                "Create a knowledge entry",
+            )
+        )
         assert result.memory_write
 
     def test_remember(self):
-        result = infer_capabilities(_make_tool(
-            "remember", "Remember this information",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "remember",
+                "Remember this information",
+            )
+        )
         assert result.memory_write
 
     def test_update_knowledge(self):
-        result = infer_capabilities(_make_tool(
-            "update_knowledge", "Update the knowledge base",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "update_knowledge",
+                "Update the knowledge base",
+            )
+        )
         assert result.memory_write
 
     def test_verb_in_name_context_in_description(self):
         """Storage verb in name + memory context in description = memory_write."""
-        result = infer_capabilities(_make_tool(
-            "store_entry", "Store an entry in the knowledge base",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "store_entry",
+                "Store an entry in the knowledge base",
+            )
+        )
         assert result.memory_write
 
     def test_generic_create_not_memory(self):
         """'create_file' has a storage verb but filesystem context, not memory."""
-        result = infer_capabilities(_make_tool(
-            "create_file", "Create a new file on disk",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "create_file",
+                "Create a new file on disk",
+            )
+        )
         assert not result.memory_write
         assert result.filesystem_write
 
@@ -308,31 +386,43 @@ class TestMemoryWrite:
 
 class TestDestructiveCapabilities:
     def test_delete_database(self):
-        result = infer_capabilities(_make_tool(
-            "delete_database", "Delete an entire database",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "delete_database",
+                "Delete an entire database",
+            )
+        )
         assert result.destructive
         assert result.filesystem_delete
         assert result.high_consequence
 
     def test_drop_table(self):
-        result = infer_capabilities(_make_tool(
-            "drop_table", "Drop a database table",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "drop_table",
+                "Drop a database table",
+            )
+        )
         assert result.destructive
         assert result.high_consequence
 
     def test_factory_reset(self):
-        result = infer_capabilities(_make_tool(
-            "factory_reset", "Reset to factory defaults",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "factory_reset",
+                "Reset to factory defaults",
+            )
+        )
         assert result.destructive
         assert result.high_consequence
 
     def test_nuke_everything(self):
-        result = infer_capabilities(_make_tool(
-            "nuke_cache", "Completely destroy the cache",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "nuke_cache",
+                "Completely destroy the cache",
+            )
+        )
         assert result.destructive
 
 
@@ -341,28 +431,40 @@ class TestDestructiveCapabilities:
 
 class TestHighConsequence:
     def test_deploy_production(self):
-        result = infer_capabilities(_make_tool(
-            "deploy_production", "Deploy to production environment",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "deploy_production",
+                "Deploy to production environment",
+            )
+        )
         assert result.high_consequence
 
     def test_migrate_database(self):
-        result = infer_capabilities(_make_tool(
-            "migrate_database", "Run database migration",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "migrate_database",
+                "Run database migration",
+            )
+        )
         assert result.high_consequence
 
     def test_release_version(self):
-        result = infer_capabilities(_make_tool(
-            "release_version", "Release a new version",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "release_version",
+                "Release a new version",
+            )
+        )
         assert result.high_consequence
 
     def test_destructive_implies_high_consequence(self):
         """Any destructive tool is automatically high_consequence."""
-        result = infer_capabilities(_make_tool(
-            "wipe_data", "Wipe all data",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "wipe_data",
+                "Wipe all data",
+            )
+        )
         assert result.destructive
         assert result.high_consequence
 
@@ -372,30 +474,42 @@ class TestHighConsequence:
 
 class TestExternalMessaging:
     def test_send_message(self):
-        result = infer_capabilities(_make_tool(
-            "send_message", "Send a message to a user",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "send_message",
+                "Send a message to a user",
+            )
+        )
         assert result.external_messaging
         assert result.network_access  # conservative cross-flag
         assert result.outbound_data_transfer
 
     def test_post_comment(self):
-        result = infer_capabilities(_make_tool(
-            "post_comment", "Post a comment on an issue",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "post_comment",
+                "Post a comment on an issue",
+            )
+        )
         assert result.external_messaging
 
     def test_slack_notify(self):
-        result = infer_capabilities(_make_tool(
-            "slack_notify", "Send a Slack notification",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "slack_notify",
+                "Send a Slack notification",
+            )
+        )
         assert result.external_messaging
         assert result.network_access
 
     def test_send_sms(self):
-        result = infer_capabilities(_make_tool(
-            "send_sms", "Send an SMS message",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "send_sms",
+                "Send an SMS message",
+            )
+        )
         assert result.external_messaging
 
 
@@ -404,9 +518,12 @@ class TestExternalMessaging:
 
 class TestCodeExecution:
     def test_run_code(self):
-        result = infer_capabilities(_make_tool(
-            "run_code", "Execute arbitrary code",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "run_code",
+                "Execute arbitrary code",
+            )
+        )
         assert result.code_execution
         # Conservative: code exec implies filesystem + network
         assert result.network_access
@@ -414,21 +531,30 @@ class TestCodeExecution:
         assert result.filesystem_write
 
     def test_bash_command(self):
-        result = infer_capabilities(_make_tool(
-            "bash", "Run a bash command",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "bash",
+                "Run a bash command",
+            )
+        )
         assert result.code_execution
 
     def test_execute_script(self):
-        result = infer_capabilities(_make_tool(
-            "execute_script", "Execute a script file",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "execute_script",
+                "Execute a script file",
+            )
+        )
         assert result.code_execution
 
     def test_eval(self):
-        result = infer_capabilities(_make_tool(
-            "eval", "Evaluate an expression",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "eval",
+                "Evaluate an expression",
+            )
+        )
         assert result.code_execution
 
 
@@ -437,21 +563,30 @@ class TestCodeExecution:
 
 class TestCredentialAccess:
     def test_get_password(self):
-        result = infer_capabilities(_make_tool(
-            "get_password", "Retrieve a stored password",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "get_password",
+                "Retrieve a stored password",
+            )
+        )
         assert result.credential_access
 
     def test_rotate_token(self):
-        result = infer_capabilities(_make_tool(
-            "rotate_token", "Rotate an API token",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "rotate_token",
+                "Rotate an API token",
+            )
+        )
         assert result.credential_access
 
     def test_auth_in_name(self):
-        result = infer_capabilities(_make_tool(
-            "auth_login", "Authenticate and log in",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "auth_login",
+                "Authenticate and log in",
+            )
+        )
         assert result.credential_access
 
 
@@ -460,34 +595,49 @@ class TestCredentialAccess:
 
 class TestUserIdentityImpact:
     def test_create_user(self):
-        result = infer_capabilities(_make_tool(
-            "create_user", "Create a new user account",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "create_user",
+                "Create a new user account",
+            )
+        )
         assert result.user_identity_impact
 
     def test_delete_user(self):
-        result = infer_capabilities(_make_tool(
-            "delete_user", "Delete a user account",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "delete_user",
+                "Delete a user account",
+            )
+        )
         assert result.user_identity_impact
         assert result.filesystem_delete  # "delete" also triggers fs_delete
 
     def test_change_role(self):
-        result = infer_capabilities(_make_tool(
-            "change_role", "Change a user's role",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "change_role",
+                "Change a user's role",
+            )
+        )
         assert result.user_identity_impact
 
     def test_grant_access(self):
-        result = infer_capabilities(_make_tool(
-            "grant_access", "Grant access to a resource",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "grant_access",
+                "Grant access to a resource",
+            )
+        )
         assert result.user_identity_impact
 
     def test_sudo(self):
-        result = infer_capabilities(_make_tool(
-            "sudo_exec", "Execute with elevated privileges",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "sudo_exec",
+                "Execute with elevated privileges",
+            )
+        )
         assert result.user_identity_impact
 
 
@@ -499,25 +649,34 @@ class TestConservativeInference:
 
     def test_send_in_name_flags_multiple(self):
         """'send' should flag network + outbound + messaging."""
-        result = infer_capabilities(_make_tool(
-            "send_report", "Send the report",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "send_report",
+                "Send the report",
+            )
+        )
         assert result.network_access
         assert result.outbound_data_transfer
         assert result.external_messaging
 
     def test_description_triggers_even_if_name_benign(self):
         """A benign name with a revealing description should still flag."""
-        result = infer_capabilities(_make_tool(
-            "process", "Fetch data from the remote API and post results",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "process",
+                "Fetch data from the remote API and post results",
+            )
+        )
         assert result.network_access
 
     def test_exec_flags_broad_capabilities(self):
         """Code execution conservatively implies filesystem + network."""
-        result = infer_capabilities(_make_tool(
-            "exec_command", "Execute a system command",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "exec_command",
+                "Execute a system command",
+            )
+        )
         assert result.code_execution
         assert result.network_access
         assert result.filesystem_read
@@ -525,18 +684,20 @@ class TestConservativeInference:
 
     def test_multiple_capabilities_stack(self):
         """A tool that matches multiple patterns gets all flags."""
-        result = infer_capabilities(_make_tool(
-            "send_email_with_attachment",
-            "Upload file and send email notification to webhook endpoint",
-            {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string"},
-                    "password": {"type": "string"},
-                    "body": {"type": "string"},
+        result = infer_capabilities(
+            _make_tool(
+                "send_email_with_attachment",
+                "Upload file and send email notification to webhook endpoint",
+                {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "password": {"type": "string"},
+                        "body": {"type": "string"},
+                    },
                 },
-            },
-        ))
+            )
+        )
         assert result.network_access
         assert result.outbound_data_transfer
         assert result.external_messaging
@@ -554,23 +715,35 @@ class TestEdgeCases:
 
     def test_empty_schema(self):
         """Empty input_schema should not crash."""
-        result = infer_capabilities(_make_tool(
-            "get_time", "Get current time", {},
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "get_time",
+                "Get current time",
+                {},
+            )
+        )
         assert not result.is_dangerous
 
     def test_none_properties_in_schema(self):
         """Schema with no 'properties' key should be handled gracefully."""
-        result = infer_capabilities(_make_tool(
-            "get_info", "Get info", {"type": "object"},
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "get_info",
+                "Get info",
+                {"type": "object"},
+            )
+        )
         assert not result.is_dangerous
 
     def test_malformed_properties_in_schema(self):
         """Non-dict properties should be handled gracefully."""
-        result = infer_capabilities(_make_tool(
-            "get_info", "Get info", {"type": "object", "properties": "invalid"},
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "get_info",
+                "Get info",
+                {"type": "object", "properties": "invalid"},
+            )
+        )
         assert not result.is_dangerous
 
     def test_single_char_name(self):
@@ -580,9 +753,12 @@ class TestEdgeCases:
 
     def test_underscore_boundaries(self):
         """Patterns should match on underscore boundaries in tool names."""
-        result = infer_capabilities(_make_tool(
-            "my_fetch_data", "Fetches data from a source",
-        ))
+        result = infer_capabilities(
+            _make_tool(
+                "my_fetch_data",
+                "Fetches data from a source",
+            )
+        )
         assert result.network_access
 
     def test_manifest_is_frozen(self):

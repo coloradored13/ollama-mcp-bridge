@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -84,17 +83,19 @@ class AuditLogger:
 
     # Events that must be flushed to disk immediately — losing these
     # on crash would compromise forensic integrity.
-    _CRITICAL_EVENTS = frozenset({
-        AuditEventType.TOOL_BLOCKED,
-        AuditEventType.TOOL_DENIED,
-        AuditEventType.TOOL_ERROR,
-        AuditEventType.RESULT_QUARANTINED,
-        AuditEventType.TAINTED_SINK_BLOCKED,
-        AuditEventType.TAINTED_SINK_CONFIRMED,
-        AuditEventType.RUG_PULL_DETECTED,
-        AuditEventType.RATE_LIMITED,
-        AuditEventType.SANITIZATION_BLOCK,
-    })
+    _CRITICAL_EVENTS = frozenset(
+        {
+            AuditEventType.TOOL_BLOCKED,
+            AuditEventType.TOOL_DENIED,
+            AuditEventType.TOOL_ERROR,
+            AuditEventType.RESULT_QUARANTINED,
+            AuditEventType.TAINTED_SINK_BLOCKED,
+            AuditEventType.TAINTED_SINK_CONFIRMED,
+            AuditEventType.RUG_PULL_DETECTED,
+            AuditEventType.RATE_LIMITED,
+            AuditEventType.SANITIZATION_BLOCK,
+        }
+    )
 
     def log(self, entry: AuditEntry) -> None:
         """Add an audit entry to the buffer and session record.
@@ -139,27 +140,29 @@ class AuditLogger:
             result_size = len(result_content.encode())
             result_hash = hashlib.sha256(result_content.encode()).hexdigest()
 
-        self.log(AuditEntry(
-            event_type=AuditEventType.TOOL_CALL,
-            server_id=server,
-            tool_name=tool,
-            action_class=action_class,
-            params_hash=params_hash,
-            params_summary=params_summary,
-            result_size=result_size,
-            result_hash=result_hash,
-            decision=decision,
-            reason=reason,
-            score=score,
-            duration_ms=duration_ms,
-            model_id=model_id,
-            turn=turn,
-            capability_manifest=capability_manifest or {},
-            sink_type=sink_type,
-            taint_summary=taint_summary,
-            deployment_mode=deployment_mode,
-            security_profile=security_profile,
-        ))
+        self.log(
+            AuditEntry(
+                event_type=AuditEventType.TOOL_CALL,
+                server_id=server,
+                tool_name=tool,
+                action_class=action_class,
+                params_hash=params_hash,
+                params_summary=params_summary,
+                result_size=result_size,
+                result_hash=result_hash,
+                decision=decision,
+                reason=reason,
+                score=score,
+                duration_ms=duration_ms,
+                model_id=model_id,
+                turn=turn,
+                capability_manifest=capability_manifest or {},
+                sink_type=sink_type,
+                taint_summary=taint_summary,
+                deployment_mode=deployment_mode,
+                security_profile=security_profile,
+            )
+        )
 
     def log_event(
         self,
@@ -180,23 +183,25 @@ class AuditLogger:
         decision_basis: str = "",
     ) -> None:
         """Log a non-tool-call event with optional enrichment fields."""
-        self.log(AuditEntry(
-            event_type=event_type,
-            server_id=server,
-            tool_name=tool,
-            reason=reason,
-            score=score,
-            approval_mode=approval_mode,
-            definition_hash=definition_hash,
-            confirmation_outcome=confirmation_outcome,
-            capability_manifest=capability_manifest or {},
-            sink_type=sink_type,
-            adapter_decisions=adapter_decisions or [],
-            taint_summary=taint_summary,
-            deployment_mode=deployment_mode,
-            security_profile=security_profile,
-            decision_basis=decision_basis,
-        ))
+        self.log(
+            AuditEntry(
+                event_type=event_type,
+                server_id=server,
+                tool_name=tool,
+                reason=reason,
+                score=score,
+                approval_mode=approval_mode,
+                definition_hash=definition_hash,
+                confirmation_outcome=confirmation_outcome,
+                capability_manifest=capability_manifest or {},
+                sink_type=sink_type,
+                adapter_decisions=adapter_decisions or [],
+                taint_summary=taint_summary,
+                deployment_mode=deployment_mode,
+                security_profile=security_profile,
+                decision_basis=decision_basis,
+            )
+        )
 
     def flush(self) -> None:
         """Write buffered entries to disk and fsync for durability.
@@ -232,6 +237,4 @@ class AuditLogger:
     @staticmethod
     def hash_params(params: dict[str, Any]) -> str:
         """Compute SHA-256 hash of params for audit (no raw secrets)."""
-        return hashlib.sha256(
-            json.dumps(params, sort_keys=True, default=str).encode()
-        ).hexdigest()
+        return hashlib.sha256(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()
