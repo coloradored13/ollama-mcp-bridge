@@ -1,0 +1,7 @@
+# Per-tier XMLs are intermediate artifacts — only the merged report is committed
+unit.xml
+live_mcp.xml
+live_model.xml
+live_multistep.xml
+adversarial_pipeline.xml
+adversarial_model.xml

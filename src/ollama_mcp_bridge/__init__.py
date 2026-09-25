@@ -1,0 +1,146 @@
+"""ollama-mcp-bridge — Security-first bridge connecting Ollama models to MCP tool servers.
+
+Copyright 2026 coloradored13
+Licensed under the Apache License, Version 2.0
+
+Public API:
+
+    from ollama_mcp_bridge import Bridge, BridgeConfig
+
+    async with Bridge.from_config("bridge.toml") as bridge:
+        result = await bridge.run("List my memories", model="llama3.1:8b")
+"""
+
+from .bridge import Bridge
+from .config import (
+    BridgeConfig,
+    DeploymentMode,
+    SecurityConfig,
+    SecurityProfile,
+    ServerConfig,
+    load_config,
+)
+from .errors import (
+    BridgeError,
+    ConfigError,
+    ConfirmationDeniedError,
+    LoopError,
+    MaxTurnsError,
+    MCPConnectionError,
+    MCPError,
+    MCPTimeoutError,
+    MCPToolError,
+    NoApprovedToolsError,
+    OllamaConnectionError,
+    OllamaError,
+    OllamaModelError,
+    OllamaResponseError,
+    ParameterRejectedError,
+    RateLimitError,
+    SecurityError,
+    StuckModelError,
+    ToolBlockedError,
+    ToolIntegrityError,
+)
+from .types import (
+    ActionClass,
+    ApprovalMode,
+    AuditEntry,
+    BridgeResult,
+    CapabilitySource,
+    ConfirmationOutcome,
+    ContentProvenance,
+    DestinationMatchResult,
+    DestinationPolicy,
+    InfluenceEvidence,
+    InfluenceState,
+    InfluenceType,
+    PathMatchResult,
+    PathPolicy,
+    PendingToolApproval,
+    RecipientMatchResult,
+    RecipientPolicy,
+    RegistryEntry,
+    ScanResult,
+    SemanticRiskAssessment,
+    ServerHealth,
+    SinkDecision,
+    SourceType,
+    StreamEvent,
+    StreamEventType,
+    TaintState,
+    ToolCallRecord,
+    ToolCapabilityManifest,
+    ToolSignalCode,
+    ToolState,
+    TrustLevel,
+    normalize_and_validate_ip,
+)
+
+__version__ = "1.0.0"
+
+__all__ = [
+    # Core
+    "Bridge",
+    # Config
+    "BridgeConfig",
+    "DeploymentMode",
+    "SecurityConfig",
+    "SecurityProfile",
+    "ServerConfig",
+    "load_config",
+    # Results
+    "BridgeResult",
+    "ScanResult",
+    "PendingToolApproval",
+    "RegistryEntry",
+    "ApprovalMode",
+    "ConfirmationOutcome",
+    "ContentProvenance",
+    "DestinationMatchResult",
+    "DestinationPolicy",
+    "InfluenceEvidence",
+    "InfluenceState",
+    "InfluenceType",
+    "PathMatchResult",
+    "PathPolicy",
+    "RecipientMatchResult",
+    "RecipientPolicy",
+    "SemanticRiskAssessment",
+    "SinkDecision",
+    "SourceType",
+    "TaintState",
+    "TrustLevel",
+    "normalize_and_validate_ip",
+    "ToolCapabilityManifest",
+    "ToolSignalCode",
+    "CapabilitySource",
+    "ToolState",
+    "StreamEvent",
+    "StreamEventType",
+    "ToolCallRecord",
+    "AuditEntry",
+    "ActionClass",
+    "ServerHealth",
+    # Errors
+    "BridgeError",
+    "ConfigError",
+    "OllamaError",
+    "OllamaConnectionError",
+    "OllamaModelError",
+    "OllamaResponseError",
+    "MCPError",
+    "MCPConnectionError",
+    "MCPToolError",
+    "MCPTimeoutError",
+    "SecurityError",
+    "ToolBlockedError",
+    "ParameterRejectedError",
+    "RateLimitError",
+    "ConfirmationDeniedError",
+    "ToolIntegrityError",
+    "NoApprovedToolsError",
+    "LoopError",
+    "MaxTurnsError",
+    "StuckModelError",
+]
