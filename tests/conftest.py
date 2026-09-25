@@ -32,7 +32,8 @@ def _pick_model() -> str:
         data = json.loads(resp.read())
         # Local models only: cloud entries report a tiny size but need signin/credits
         models = [
-            m for m in data.get("models", [])
+            m
+            for m in data.get("models", [])
             if "cloud" not in m.get("name", "") and not m.get("remote_host")
         ]
         if not models:
