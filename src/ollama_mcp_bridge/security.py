@@ -1148,7 +1148,6 @@ class RateLimiter:
         self._max_calls_per_session = config.max_tool_calls_per_session
         self._rate_per_server = config.rate_limit_per_server
         self._max_per_tool = self.DEFAULT_MAX_CALLS_PER_TOOL
-        self._server_call_counts: dict[str, int] = {}  # server → count
         self._tool_call_counts: dict[str, int] = {}  # "server:tool" → count
         self._call_timestamps: dict[str, list[float]] = {}  # server → [timestamps]
         self._total_calls = 0
@@ -1190,7 +1189,6 @@ class RateLimiter:
     def record_call(self, server: str, tool: str) -> None:
         """Record a successful tool call for rate tracking."""
         self._total_calls += 1
-        self._server_call_counts[server] = self._server_call_counts.get(server, 0) + 1
         tool_key = f"{server}:{tool}"
         self._tool_call_counts[tool_key] = self._tool_call_counts.get(tool_key, 0) + 1
         timestamps = self._call_timestamps.setdefault(server, [])
